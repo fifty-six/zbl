@@ -1,0 +1,14 @@
+# build results
+*.efi
+*.obj
+*.pdb
+
+# qemu nvvars
+NvVars
+
+# build
+zig-cache
+zig-out
+
+# Windows qemu libs
+usr

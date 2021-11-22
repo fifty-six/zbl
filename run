@@ -1,0 +1,4 @@
+trap /usr/bin/reset EXIT
+trap /usr/bin/reset SIGINT
+
+qemu-system-x86_64 -bios ./usr/share/edk2.git/ovmf-x64/OVMF-pure-efi.fd -hdd fat:rw:. -serial stdio # -display none
