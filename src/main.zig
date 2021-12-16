@@ -18,9 +18,60 @@ var alloc_bytes: [100 * 1024]u8 = undefined;
 var alloc_state = std.heap.FixedBufferAllocator.init(&panic_allocator_bytes);
 const fixed_alloc = &alloc_state.allocator;
 
-pub fn fail_if_err(st: Status, comptime msg: []const u8) void {
-    if (st != .Success)
-        @panic(msg);
+var sys_table: *uefi.tables.SystemTable = undefined;
+var boot_services: *uefi.tables.BootServices = undefined;
+var con_in: *protocols.SimpleTextInputProtocol = undefined;
+var con_out: *protocols.SimpleTextOutputProtocol = undefined;
+var out: Output = undefined;
+
+pub fn open_protocol(handle: uefi.Handle, comptime protocol: type) !*protocol {
+    var ptr: *protocol = undefined;
+    if (boot_services.openProtocol(
+        handle,
+        &protocol.guid,
+        @ptrCast(*?*c_void, &ptr),
+        uefi.handle,
+        null,
+        uefi.tables.OpenProtocolAttributes{ .by_handle_protocol = true },
+    ) != .Success) {
+        return error.FailedToOpenProtocol;
+    }
+
+    return ptr;
+}
+
+const FullDevicePathErr = error{
+    DeviceError,
+    Unsupported,
+    UnknownGlyph,
+};
+
+pub fn full_device_path(dpp: *protocols.DevicePathProtocol) anyerror!void {
+    if (dpp.type == .Media) {
+        var subtype = @intToEnum(protocols.MediaDevicePath.Subtype, dpp.subtype);
+        if (subtype == .FilePath) {
+            try out.print16(dpp.getDevicePath().?.Media.FilePath.getPath());
+            try out.print("\r\n");
+        } else {
+            try out.printf("Unhandled .Media {s}\r\n", .{@tagName(subtype)});
+        }
+    } else {
+        try out.printf("Node: {s}\r\n", .{@tagName(dpp.type)});
+    }
+
+    if (dpp.type == .End) {
+        var subtype = @intToEnum(protocols.EndDevicePath.Subtype, dpp.subtype);
+        try out.printf("End: {s}\r\n", .{@tagName(subtype)});
+        return;
+    }
+
+    var len = 4 + @intCast(u8, dpp.length >> 8);
+
+    try out.printf("Length: {d}\r\n", .{len});
+
+    var new_dpp = @intToPtr(*protocols.DevicePathProtocol, @ptrToInt(dpp) + len);
+
+    try full_device_path(new_dpp);
 }
 
 pub fn main() void {
@@ -28,11 +79,11 @@ pub fn main() void {
 }
 
 pub fn caught_main() !void {
-    const sys_table = uefi.system_table;
-    const boot_services = sys_table.boot_services.?;
-    const con_out = sys_table.con_out.?;
-    const con_in = sys_table.con_in.?;
-    const out = Output{ .con = con_out };
+    sys_table = uefi.system_table;
+    boot_services = sys_table.boot_services.?;
+    con_out = sys_table.con_out.?;
+    con_in = sys_table.con_in.?;
+    out = Output{ .con = con_out };
 
     try out.reset(false);
     try out.println("hi");
@@ -42,41 +93,24 @@ pub fn caught_main() !void {
 
     try out.reset(false);
 
-    var image = uefi.handle;
-    var sfp: ?*protocols.LoadedImageProtocol = undefined;
-    var attrs = uefi.tables.OpenProtocolAttributes{
-        .by_handle_protocol = true,
-    };
+    const image = uefi.handle;
 
-    if (boot_services.openProtocol(image, &protocols.LoadedImageProtocol.guid, @ptrCast(*?*c_void, &sfp), image, null, attrs) != .Success)
-        return error.FailedToOpenLoadedImageProtocol;
+    var sfp = try open_protocol(image, protocols.LoadedImageProtocol);
+    var file_protocol = try open_protocol(sfp.*.device_handle.?, protocols.SimpleFileSystemProtocol);
 
-    var path_protocol = sfp.?.file_path.*;
+    try out.printf("{s}\r\n", .{@tagName(sfp.file_path.type)});
+    try out.printf("{s}\r\n", .{@tagName(@intToEnum(protocols.MediaDevicePath.Subtype, sfp.file_path.subtype))});
 
-    var path = path_protocol.getDevicePath();
+    // bro what else would it be
+    if (sfp.file_path.type != .Media)
+        return error.ImageFilePathNotMedia;
 
-    if (path_protocol.type != .Media)
-        return error.PathProtocolNotMedia;
+    if (@intToEnum(protocols.MediaDevicePath.Subtype, sfp.file_path.subtype) != .FilePath)
+        return error.DeviceHandleNotAtFilePath;
 
-    var subtype = @intToEnum(protocols.MediaDevicePath.Subtype, path_protocol.subtype);
-    var subtype_str: []const u8 = undefined;
-
-    inline for (@typeInfo(protocols.MediaDevicePath.Subtype).Enum.fields) |field| {
-        if (path_protocol.subtype == field.value)
-            subtype_str = field.name;
-    }
-
-    try out.printf("{s}\r\n", .{subtype_str});
-
-    if (subtype == .FilePath) {
-        var path_str = path.?.Media.FilePath.getPath();
-        var buf = std.mem.spanZ(path_str);
-
-        try out.printf("len = {}\r\n", .{buf.len});
-
-        try out.print16(path_str);
-        try out.println("");
-    }
+    try full_device_path(sfp.file_path);
+    // try out.print16(sfp.file_path.getDevicePath().?.Media.FilePath.getPath());
+    // try out.print("\r\n");
 
     _ = boot_services.stall(5 * 1000 * 1000);
 
