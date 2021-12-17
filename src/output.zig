@@ -22,7 +22,7 @@ pub const Output = struct {
     }
 
     pub fn printf(self: *const Output, comptime format: []const u8, args: anytype) !void {
-        var utf16: [256]u16 = undefined;
+        var utf16: [256:0]u16 = undefined;
         var format_buf: [256]u8 = undefined;
 
         var slice = try std.fmt.bufPrint(&format_buf, format, args);
@@ -30,7 +30,7 @@ pub const Output = struct {
 
         utf16[length] = 0;
 
-        try self.err(self.con.outputString(@ptrCast([*:0]u16, &utf16)));
+        try self.err(self.con.outputString(&utf16));
     }
 
     pub fn println(self: *const Output, comptime buf: []const u8) !void {

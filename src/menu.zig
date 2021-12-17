@@ -22,7 +22,13 @@ pub const Menu = struct {
     const In = protocols.SimpleTextInputProtocol;
 
     pub fn init(entries: []const MenuEntry, out: Output, in: *In) Menu {
-        var self = Menu{ .entries = entries, .out = out, .in = in, ._highlighted = 0, ._res = Vec{ .x = 0, .y = 0 } };
+        var self = Menu{
+            .entries = entries,
+            .out = out,
+            .in = in,
+            ._highlighted = 0,
+            ._res = Vec{ .x = 0, .y = 0 },
+        };
 
         _ = out.con.queryMode(out.con.mode.mode, &self._res.x, &self._res.y);
 

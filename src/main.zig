@@ -118,33 +118,45 @@ pub fn device_path_to_str(alloc: *std.mem.Allocator, dpp: *protocols.DevicePathP
     return try res.toOwnedSliceSentinel(0);
 }
 
-pub fn full_device_path(dpp: *protocols.DevicePathProtocol) anyerror!void {
-    if (dpp.type == .Media) {
-        var subtype = @intToEnum(protocols.MediaDevicePath.Subtype, dpp.subtype);
-        if (subtype == .FilePath) {
-            try out.print16(dpp.getDevicePath().?.Media.FilePath.getPath());
-            try out.print("\r\n");
-        } else {
-            try out.printf("Unhandled .Media {s}\r\n", .{@tagName(subtype)});
+pub fn ls(fp: *const protocols.FileProtocol) !void {
+    var buf: [4096]u8 align(8) = undefined;
+    var size = buf.len;
+
+    while (size != 0) {
+        size = buf.len;
+
+        if (fp.getInfo(&protocols.FileProtocol.guid, &size, &buf) != .Success)
+            return error.InfoError;
+
+        var file_info = @ptrCast(*protocols.FileInfo, &buf);
+
+        comptime const efi_file_dir = protocols.FileInfo.efi_file_directory;
+
+        try out.print16(file_info.getFileName());
+        try out.printf("\r\nfileSize: {d}, physicalSize: {d}, attr: {x}, dir: {x} \r\n", .{
+            file_info.file_size,
+            file_info.physical_size,
+            file_info.attribute,
+            (file_info.attribute & efi_file_dir) == efi_file_dir,
+        });
+
+        size = buf.len;
+
+        var res = fp.read(&size, &buf);
+        if (res != .Success) {
+            if (res == .BufferTooSmall) {
+                try out.printf("size required is {d}\r\n", .{size});
+                _ = boot_services.stall(5 * 1000 * 100);
+            }
+            return error.DiskError;
         }
-    } else {
-        try out.printf("Node: {d}\r\n", .{dpp.type});
+
+        file_info = @ptrCast(*protocols.FileInfo, &buf);
+
+        try out.print16(file_info.getFileName());
+
+        _ = boot_services.stall(5 * 1000 * 100);
     }
-
-    if (dpp.type == .End) {
-        var subtype = @intToEnum(protocols.EndDevicePath.Subtype, dpp.subtype);
-        try out.printf("End: {s}\r\n", .{@tagName(subtype)});
-        return;
-    }
-
-    // var len = 4 + @intCast(u8, dpp.length >> 8);
-    var len = dpp.length;
-
-    try out.printf("Length: {d}\r\n", .{len});
-
-    var new_dpp = @intToPtr(*protocols.DevicePathProtocol, @ptrToInt(dpp) + len);
-
-    try full_device_path(new_dpp);
 }
 
 pub fn main() void {
@@ -159,34 +171,23 @@ pub fn caught_main() !void {
     out = Output{ .con = con_out };
 
     try out.reset(false);
-    try out.println("hi");
-
-    // Wait to say hi.
-    _ = boot_services.stall(1 * 1000 * 1000);
-
-    try out.reset(false);
 
     const image = uefi.handle;
 
-    var sfp = try open_protocol(image, protocols.LoadedImageProtocol);
-    var file_protocol = try open_protocol(sfp.*.device_handle.?, protocols.SimpleFileSystemProtocol);
+    var img_proto = try open_protocol(image, protocols.LoadedImageProtocol);
+    var sfsp = try open_protocol(img_proto.*.device_handle.?, protocols.SimpleFileSystemProtocol);
 
-    try out.printf("{s}\r\n", .{@tagName(sfp.file_path.type)});
-    try out.printf("{s}\r\n", .{@tagName(@intToEnum(protocols.MediaDevicePath.Subtype, sfp.file_path.subtype))});
+    try out.print16(try device_path_to_str(fixed_alloc, img_proto.file_path));
+    try out.print("\r\n");
 
-    // bro what else would it be
-    if (sfp.file_path.type != .Media)
-        return error.ImageFilePathNotMedia;
+    var fp: *const protocols.FileProtocol = undefined;
 
-    if (@intToEnum(protocols.MediaDevicePath.Subtype, sfp.file_path.subtype) != .FilePath)
-        return error.DeviceHandleNotAtFilePath;
+    if (sfsp.openVolume(&fp) != .Success)
+        return error.UnableToOpenVolume;
 
-    try out.print16(try device_path_to_str(fixed_alloc, sfp.file_path));
-    // full_device_path(sfp.file_path);
-    // try out.print16(sfp.file_path.getDevicePath().?.Media.FilePath.getPath());
-    // try out.print("\r\n");
+    try ls(fp);
 
-    _ = boot_services.stall(5 * 1000 * 1000);
+    _ = boot_services.stall(3 * 1000 * 1000);
 
     try out.reset(false);
 
