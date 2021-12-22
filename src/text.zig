@@ -10,10 +10,6 @@ pub fn text() void {
     _text() catch {};
 }
 
-pub fn read_key(key: *uefi.protocols.InputKey, wait: bool) void {
-    if (wait) {}
-}
-
 fn _text() !void {
     const sys_table = uefi.system_table;
     const boot_services = sys_table.boot_services.?;

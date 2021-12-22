@@ -12,7 +12,7 @@ var already_panicking: bool = false;
 // For adding debug info later.
 var panic_allocator_bytes: [100 * 1024]u8 = undefined;
 var panic_allocator_state = std.heap.FixedBufferAllocator.init(&panic_allocator_bytes);
-const panic_allocator = &panic_allocator_state.allocator;
+const panic_allocator = panic_allocator_state.allocator();
 
 pub fn die(status: Status) noreturn {
     uefi.system_table.runtime_services.resetSystem(.ResetShutdown, status, 0, null);
@@ -20,6 +20,9 @@ pub fn die(status: Status) noreturn {
 
 pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace) noreturn {
     @setCold(true);
+
+    // Don't have DWARF info.
+    _ = error_return_trace;
 
     const out = Output{ .con = uefi.system_table.std_err.? };
 

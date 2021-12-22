@@ -10,5 +10,7 @@ NvVars
 zig-cache
 zig-out
 
+EFI/*
+
 # Windows qemu libs
 usr
