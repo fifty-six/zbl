@@ -6,7 +6,16 @@ const panic_handler = @import("panic.zig");
 const Status = uefi.Status;
 const Output = @import("output.zig").Output;
 
-pub const MenuEntry = struct { description: []const u8, callback: fn () void };
+pub const CallbackFun = union(enum) {
+    Empty: fn () void,
+    WithData: fn (?*align(8) const anyopaque) void,
+};
+
+pub const MenuEntry = struct {
+    description: [:0]const u16,
+    callback: CallbackFun,
+    data: ?*align(8) const anyopaque,
+};
 
 const Vec = struct { x: usize, y: usize };
 
@@ -106,7 +115,9 @@ pub const Menu = struct {
                 _ = self.out.con.setAttribute(ConOut.background_black | ConOut.white);
             }
 
-            try self.out.printf("{s}\r\n", .{entry.description});
+            // try self.out.printf("{s}\r\n", .{entry.description});
+            try self.out.print16(entry.description);
+            try self.out.print("\r\n");
         }
 
         _ = self.out.con.setAttribute(ConOut.background_black | ConOut.white);

@@ -37,7 +37,7 @@ pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace) nore
 
     _ = out.con.setAttribute(SimpleTextOutputProtocol.red);
 
-    out.reset(false) catch unreachable;
+    // out.reset(false) catch unreachable;
 
     out.printf("\r\nerr: {s}\r\n", .{msg}) catch unreachable;
     out.println("Press any key to stop.") catch unreachable;
