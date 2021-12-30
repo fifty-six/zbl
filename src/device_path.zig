@@ -2,8 +2,9 @@ const std = @import("std");
 const uefi = std.os.uefi;
 const protocols = uefi.protocols;
 
-const MediaDevicePath = protocols.MediaDevicePath;
 const DevicePathProtocol = protocols.DevicePathProtocol;
+const FilePathDevicePath = protocols.MediaDevicePath.FilePathDevicePath;
+const EndEntireDevicePath = protocols.EndDevicePath.EndEntireDevicePath;
 
 const utf16_str = std.unicode.utf8ToUtf16LeStringLiteral;
 
@@ -40,7 +41,7 @@ pub fn dpp_size(dpp: *DevicePathProtocol) usize {
 
     var node = dpp;
     while (node.type != .End) {
-        node = @intToPtr(*DevicePathProtocol, @ptrToInt(node) + node.length);
+        node = @ptrCast(*DevicePathProtocol, @ptrCast([*]u8, node) + node.length);
     }
 
     return (@ptrToInt(node) + node.length) - @ptrToInt(start);
@@ -57,26 +58,24 @@ pub fn file_path(
 
     std.mem.copy(u8, buf, @ptrCast([*]u8, dpp)[0..size]);
 
-    var new_dpp = @intToPtr(*DevicePathProtocol, @ptrToInt(buf.ptr) + size - 4);
+    // Pointer to the start of the protocol, which is - 4 as the size includes the node length field.
+    var new_dpp = @ptrCast(*FilePathDevicePath, buf.ptr + size - 4);
 
     new_dpp.type = .Media;
-    new_dpp.subtype = @enumToInt(MediaDevicePath.Subtype.FilePath);
-    new_dpp.length = 4 + 2 * (@intCast(u16, path.len) + 1);
+    new_dpp.subtype = .FilePath;
+    new_dpp.length = @sizeOf(FilePathDevicePath) + 2 * (@intCast(u16, path.len) + 1);
 
-    var ptr = @ptrCast(
-        [*:0]u16,
-        @alignCast(2, @ptrCast([*]u8, new_dpp)) + @sizeOf(MediaDevicePath.FilePathDevicePath),
-    );
+    var ptr = @ptrCast([*:0]u16, @alignCast(2, @ptrCast([*]u8, new_dpp)) + @sizeOf(FilePathDevicePath));
 
     for (path) |s, i|
         ptr[i] = s;
 
     ptr[path.len] = 0;
 
-    var next = @intToPtr(*DevicePathProtocol, @ptrToInt(new_dpp) + new_dpp.length);
+    var next = @ptrCast(*EndEntireDevicePath, @ptrCast([*]u8, new_dpp) + new_dpp.length);
     next.type = .End;
-    next.subtype = @enumToInt(protocols.EndDevicePath.EndEntire);
-    next.length = 4;
+    next.subtype = .EndEntire;
+    next.length = @sizeOf(EndEntireDevicePath);
 
     return @ptrCast(*DevicePathProtocol, buf.ptr);
 }
@@ -93,7 +92,7 @@ pub fn to_str(alloc: std.mem.Allocator, dpp: *DevicePathProtocol) ![:0]u16 {
         if (q_path == null) {
             try res.appendSlice(tag_to_utf16_literal.get(@tagName(node.type)).?);
             try res.append('\\');
-            node = @intToPtr(@TypeOf(node), @ptrToInt(node) + node.length);
+            node = @ptrCast(@TypeOf(node), @ptrCast([*]u8, node) + node.length);
             continue;
         }
 
@@ -125,7 +124,7 @@ pub fn to_str(alloc: std.mem.Allocator, dpp: *DevicePathProtocol) ![:0]u16 {
 
         try res.append('\\');
 
-        node = @intToPtr(@TypeOf(node), @ptrToInt(node) + node.length);
+        node = @ptrCast(@TypeOf(node), @ptrCast([*]u8, node) + node.length);
     }
 
     return try res.toOwnedSliceSentinel(0);
