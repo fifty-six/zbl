@@ -5,8 +5,6 @@ const protocols = uefi.protocols;
 
 const menus = @import("menu.zig");
 const output = @import("output.zig");
-const move = @import("move.zig");
-const text = @import("text.zig");
 const device_path = @import("device_path.zig");
 const uefi_pool_alloc = @import("uefi_pool_allocator.zig");
 const fs_info = @import("fs_info.zig");
@@ -357,27 +355,6 @@ pub fn caught_main() !void {
     const LoaderMenu = Menu(Loader, MenuError);
     const MenuEntry = LoaderMenu.MenuEntry;
     var entries = std.ArrayList(MenuEntry).init(alloc);
-
-    const wrap = struct {
-        fn wrap_move() !void {
-            move.move();
-        }
-
-        fn wrap_text() !void {
-            text.text();
-        }
-    };
-
-    try entries.appendSlice(&[_]MenuEntry{
-        MenuEntry{
-            .description = utf16_str("Move the cursor"),
-            .callback = .{ .Empty = wrap.wrap_move },
-        },
-        MenuEntry{
-            .description = utf16_str("Write some text"),
-            .callback = .{ .Empty = wrap.wrap_text },
-        },
-    });
 
     for (loaders.items) |*entry| {
         var desc = try std.mem.concat(alloc, u16, &[_][]const u16{
