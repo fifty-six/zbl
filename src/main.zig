@@ -9,6 +9,7 @@ const move = @import("move.zig");
 const text = @import("text.zig");
 const device_path = @import("device_path.zig");
 const uefi_alloc = @import("uefi_allocator.zig");
+const fs_info = @import("fs_info.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -23,18 +24,15 @@ const FileInfo = protocols.FileInfo;
 const FileProtocol = protocols.FileProtocol;
 const SimpleFileSystemProtocol = protocols.SimpleFileSystemProtocol;
 const DevicePathProtocol = protocols.DevicePathProtocol;
+const FileSystemInfo = fs_info.FileSystemInfo;
 
 const utf16_str = std.unicode.utf8ToUtf16LeStringLiteral;
-
-var alloc_bytes: [100 * 1024]u8 = undefined;
-var alloc_state = std.heap.FixedBufferAllocator.init(&alloc_bytes);
-const fixed_alloc = alloc_state.allocator();
 
 var sys_table: *uefi.tables.SystemTable = undefined;
 var boot_services: *uefi.tables.BootServices = undefined;
 var con_in: *protocols.SimpleTextInputProtocol = undefined;
 var con_out: *protocols.SimpleTextOutputProtocol = undefined;
-pub var out: Output = undefined;
+var out: Output = undefined;
 
 var heap_alloc_state: std.heap.ArenaAllocator = undefined;
 var heap_alloc: Allocator = undefined;
@@ -280,23 +278,29 @@ pub fn caught_main() !void {
         if (sfsp.openVolume(&fp) != .Success)
             return error.UnableToOpenVolume;
 
+        var size = buf.len;
+
+        if (fp.getInfo(&FileSystemInfo.guid, &size, &buf) != .Success)
+            return error.UnableToGetInfo;
+
+        var info = @ptrCast(*FileSystemInfo, &buf);
+        var label = info.getVolumeLabel();
+
         var disk_info = DiskInfo{
             .disk = device,
-            .disk_name = try device_path.to_str(alloc, device),
+            // Have to dupe the label as its from the buffer, which we'll overwrite.
+            .disk_name = try alloc.dupeZ(u16, std.mem.span(label)),
         };
 
         while (try scan_dir(fp, &buf)) |fname| {
-            var name = try alloc.alloc(u16, fname.len + 1);
-            name[name.len - 1] = 0;
+            var name = try alloc.dupeZ(u16, fname);
 
-            std.mem.copy(u16, name, fname);
-
-            try out.print16(name[0 .. name.len - 1 :0].ptr);
+            try out.print16(name.ptr);
             try out.print("\r\n");
 
             try loaders.append(Loader{
                 .disk_info = disk_info,
-                .file_name = name[0 .. name.len - 1 :0],
+                .file_name = name,
             });
         }
 
