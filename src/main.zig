@@ -8,7 +8,7 @@ const output = @import("output.zig");
 const move = @import("move.zig");
 const text = @import("text.zig");
 const device_path = @import("device_path.zig");
-const uefi_alloc = @import("uefi_allocator.zig");
+const uefi_pool_alloc = @import("uefi_pool_allocator.zig");
 const fs_info = @import("fs_info.zig");
 
 const Allocator = std.mem.Allocator;
@@ -34,8 +34,15 @@ var con_in: *protocols.SimpleTextInputProtocol = undefined;
 var con_out: *protocols.SimpleTextOutputProtocol = undefined;
 var out: Output = undefined;
 
-var heap_alloc_state: std.heap.ArenaAllocator = undefined;
-var heap_alloc: Allocator = undefined;
+var pool_alloc_state: std.heap.ArenaAllocator = undefined;
+var pool_alloc: Allocator = undefined;
+
+const exceptions = [_][:0]const u16{
+    // Windows bootloader
+    utf16_str("EFI\\Microsoft\\Boot\\bootmgfw.efi"),
+    // Mac bootloader
+    utf16_str("System\\Library\\CoreServices\\boot.efi"),
+};
 
 pub fn open_protocol(handle: uefi.Handle, comptime protocol: type) !*protocol {
     var ptr: *protocol = undefined;
@@ -43,7 +50,9 @@ pub fn open_protocol(handle: uefi.Handle, comptime protocol: type) !*protocol {
         handle,
         &protocol.guid,
         @ptrCast(*?*anyopaque, &ptr),
+        // Invoking handle is our loaded image as we're a UEFI application
         uefi.handle,
+        // Controller handle (null as we're not a driver)
         null,
         uefi.tables.OpenProtocolAttributes{ .by_handle_protocol = true },
     ) != .Success) {
@@ -73,7 +82,7 @@ pub const Loader = struct {
     pub fn load(self: *const Self) !void {
         var img: ?uefi.Handle = undefined;
 
-        var image_path = try device_path.file_path(heap_alloc, self.disk_info.disk, self.file_name);
+        var image_path = try device_path.file_path(pool_alloc, self.disk_info.disk, self.file_name);
         var res = boot_services.loadImage(false, uefi.handle, image_path, null, 0, &img);
 
         if (res != .Success) {
@@ -211,9 +220,6 @@ pub fn scan_efi(
     const efi_str = utf16_str("EFI");
 
     while (try next_dir(efi, buf)) |dir| {
-        // NOTE:
-        // dir.name and dir.file_info point into the buffer
-        // so copy them out before re-using buffer.
         defer dir.deinit();
 
         // Copy out the path with the prefix, as it's in the buffer which will be cleared.
@@ -260,20 +266,20 @@ pub fn caught_main() !void {
         return error.EnumerateHandleFailure;
     }
 
-    heap_alloc_state = std.heap.ArenaAllocator.init(uefi_alloc.allocator);
-    heap_alloc = heap_alloc_state.allocator();
+    pool_alloc_state = std.heap.ArenaAllocator.init(uefi_pool_alloc.allocator);
+    pool_alloc = pool_alloc_state.allocator();
 
-    var alloc = heap_alloc;
+    var alloc = pool_alloc;
 
     var handles = handle_ptr[0..res_size];
-    var loaders = std.ArrayList(Loader).init(heap_alloc);
+    var loaders = std.ArrayList(Loader).init(alloc);
 
     var buf: [1024]u8 align(8) = undefined;
     for (handles) |handle| {
         var sfsp = try open_protocol(handle, SimpleFileSystemProtocol);
         var device = try open_protocol(handle, DevicePathProtocol);
 
-        var fp: *const protocols.FileProtocol = undefined;
+        var fp: *const FileProtocol = undefined;
 
         if (sfsp.openVolume(&fp) != .Success)
             return error.UnableToOpenVolume;
@@ -284,14 +290,15 @@ pub fn caught_main() !void {
             return error.UnableToGetInfo;
 
         var info = @ptrCast(*FileSystemInfo, &buf);
-        var label = info.getVolumeLabel();
+        // Have to dupe the label as its from the buffer, which we'll overwrite.
+        var label = try alloc.dupeZ(u16, std.mem.span(info.getVolumeLabel()));
 
         var disk_info = DiskInfo{
             .disk = device,
-            // Have to dupe the label as its from the buffer, which we'll overwrite.
-            .disk_name = try alloc.dupeZ(u16, std.mem.span(label)),
+            .disk_name = label,
         };
 
+        // Scanning the root directory
         while (try scan_dir(fp, &buf)) |fname| {
             var name = try alloc.dupeZ(u16, fname);
 
@@ -304,10 +311,22 @@ pub fn caught_main() !void {
             });
         }
 
-        try scan_efi(heap_alloc, &loaders, fp, disk_info, &buf);
+        try scan_efi(alloc, &loaders, fp, disk_info, &buf);
+
+        for (exceptions) |exception| {
+            var efp: *const FileProtocol = undefined;
+
+            if (fp.open(&efp, exception, FileProtocol.efi_file_mode_read, 0) != .Success)
+                continue;
+
+            try loaders.append(Loader{
+                .disk_info = disk_info,
+                .file_name = exception,
+            });
+        }
     }
 
-    var entries = std.ArrayList(MenuEntry).init(heap_alloc);
+    var entries = std.ArrayList(MenuEntry).init(alloc);
 
     try entries.appendSlice(&[_]MenuEntry{
         MenuEntry{
@@ -323,7 +342,7 @@ pub fn caught_main() !void {
     });
 
     for (loaders.items) |*entry| {
-        var desc = try std.mem.concat(heap_alloc, u16, &[_][]const u16{
+        var desc = try std.mem.concat(alloc, u16, &[_][]const u16{
             entry.disk_info.disk_name,
             utf16_str(": "),
             entry.file_name,
