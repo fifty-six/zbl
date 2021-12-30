@@ -18,7 +18,6 @@ const Status = uefi.Status;
 const Output = output.Output;
 
 const Menu = menus.Menu;
-const MenuEntry = menus.MenuEntry;
 
 const FileInfo = protocols.FileInfo;
 const FileProtocol = protocols.FileProtocol;
@@ -56,10 +55,43 @@ pub fn open_protocol(handle: uefi.Handle, comptime protocol: type) !*protocol {
         null,
         uefi.tables.OpenProtocolAttributes{ .by_handle_protocol = true },
     ) != .Success) {
-        return error.FailedToOpenProtocol;
+        return error.ProtocolOpenFailure;
     }
 
     return ptr;
+}
+
+pub const MenuError = error{
+    GetVariableFailure,
+    SetVariableFailure,
+} || Loader.LoaderError;
+
+pub fn reboot_into_firmware() MenuError!void {
+    const nonvolatile_access = 0x01;
+    const bootservice_access = 0x02;
+    const runtime_access = 0x04;
+
+    const boot_to_firmware = 0x01;
+
+    const rs = sys_table.runtime_services;
+    const global_var = &uefi.tables.global_variable;
+
+    var size: usize = @sizeOf(usize);
+    var os_ind: usize = undefined;
+
+    if (rs.getVariable(utf16_str("OsIndications"), global_var, null, &size, &os_ind) != .Success)
+        return error.GetVariableFailure;
+
+    if ((os_ind & boot_to_firmware) == 0) {
+        var attrs: u32 = runtime_access | bootservice_access | nonvolatile_access;
+
+        os_ind |= boot_to_firmware;
+
+        if (rs.setVariable(utf16_str("OsIndications"), global_var, attrs, @sizeOf(usize), &os_ind) != .Success)
+            return error.SetVariableFailure;
+    }
+
+    uefi.system_table.runtime_services.resetSystem(.ResetCold, .Success, 0, null);
 }
 
 pub const Loader = struct {
@@ -68,25 +100,21 @@ pub const Loader = struct {
     file_name: [:0]const u16,
     disk_info: DiskInfo,
 
-    pub fn load_callback(ptr: ?*align(8) const anyopaque) void {
-        if (ptr == null) {
-            unreachable;
-        }
+    pub const LoaderError = error{
+        ImageStartFailure,
+        ImageLoadFailure,
+        OutOfMemory,
+        ProtocolOpenFailure,
+    };
 
-        @ptrCast(*const Loader, ptr.?).load() catch |e| {
-            out.printf("{s}\r\n", .{@errorName(e)}) catch return;
-            return;
-        };
-    }
-
-    pub fn load(self: *const Self) !void {
+    pub fn load(self: *const Self) LoaderError!void {
         var img: ?uefi.Handle = undefined;
 
         var image_path = try device_path.file_path(pool_alloc, self.disk_info.disk, self.file_name);
         var res = boot_services.loadImage(false, uefi.handle, image_path, null, 0, &img);
 
         if (res != .Success) {
-            try out.printf("{s}\r\n", .{@tagName(res)});
+            out.printf("{s}\r\n", .{@tagName(res)}) catch return;
             return error.ImageLoadFailure;
         }
 
@@ -326,18 +354,28 @@ pub fn caught_main() !void {
         }
     }
 
+    const LoaderMenu = Menu(Loader, MenuError);
+    const MenuEntry = LoaderMenu.MenuEntry;
     var entries = std.ArrayList(MenuEntry).init(alloc);
+
+    const wrap = struct {
+        fn wrap_move() !void {
+            move.move();
+        }
+
+        fn wrap_text() !void {
+            text.text();
+        }
+    };
 
     try entries.appendSlice(&[_]MenuEntry{
         MenuEntry{
             .description = utf16_str("Move the cursor"),
-            .callback = .{ .Empty = move.move },
-            .data = null,
+            .callback = .{ .Empty = wrap.wrap_move },
         },
         MenuEntry{
             .description = utf16_str("Write some text"),
-            .callback = .{ .Empty = text.text },
-            .data = null,
+            .callback = .{ .Empty = wrap.wrap_text },
         },
     });
 
@@ -351,33 +389,51 @@ pub fn caught_main() !void {
 
         try entries.append(MenuEntry{
             .description = desc[0 .. desc.len - 1 :0],
-            .callback = .{ .WithData = Loader.load_callback },
-            .data = &(entry.*),
+            .callback = .{ .WithData = .{
+                .fun = Loader.load,
+                .data = entry,
+            } },
         });
     }
 
     try entries.append(MenuEntry{
+        .description = utf16_str("Reboot into firmware"),
+        .callback = .{ .Empty = reboot_into_firmware },
+    });
+
+    try entries.append(MenuEntry{
         .description = utf16_str("Exit"),
         .callback = .{ .Empty = die_fast },
-        .data = null,
     });
 
     try out.reset(false);
 
-    var menu = Menu.init(entries.items, out, con_in);
+    var menu = LoaderMenu.init(entries.items, out, con_in);
 
-    var entry = try menu.run();
+    while (true) {
+        var entry = try menu.run();
 
-    switch (entry.callback) {
-        .WithData => |fun| {
-            fun(entry.data);
-        },
-        .Empty => |fun| {
-            fun();
-        },
+        var err = switch (entry.callback) {
+            .WithData => |info| blk: {
+                break :blk info.fun(info.data);
+            },
+            .Empty => |fun| blk: {
+                break :blk fun();
+            },
+        };
+
+        err catch |e| {
+            try out.reset(false);
+
+            try out.printf("error in menu callback: {s}\r\n", .{@errorName(e)});
+            _ = boot_services.stall(1000 * 1000);
+
+            try out.reset(false);
+            continue;
+        };
+
+        unreachable;
     }
-
-    unreachable;
 }
 
 const f_panic = @import("panic.zig");

@@ -11,116 +11,128 @@ pub const CallbackFun = union(enum) {
     WithData: fn (?*align(8) const anyopaque) void,
 };
 
-pub const MenuEntry = struct {
-    description: [:0]const u16,
-    callback: CallbackFun,
-    data: ?*align(8) const anyopaque,
-};
-
 const Vec = struct { x: usize, y: usize };
 
-pub const Menu = struct {
-    entries: []const MenuEntry,
-    out: Output,
-    in: *In,
+pub fn Menu(comptime T: type, comptime err: type) type {
+    return struct {
+        const Self = @This();
 
-    _res: Vec,
-    _highlighted: usize,
+        pub const MenuEntry = struct {
+            const DataCallback = struct {
+                fun: fn (*const T) err!void,
+                data: *const T,
+            };
 
-    const ConOut = protocols.SimpleTextOutputProtocol;
-    const In = protocols.SimpleTextInputProtocol;
+            const Callback = union(enum) {
+                Empty: fn () err!void,
+                WithData: DataCallback,
+            };
 
-    pub fn init(entries: []const MenuEntry, out: Output, in: *In) Menu {
-        var self = Menu{
-            .entries = entries,
-            .out = out,
-            .in = in,
-            ._highlighted = 0,
-            ._res = Vec{ .x = 0, .y = 0 },
+            description: [:0]const u16,
+            callback: Callback,
         };
 
-        _ = out.con.queryMode(out.con.mode.mode, &self._res.x, &self._res.y);
+        entries: []const MenuEntry,
+        out: Output,
+        in: *In,
 
-        return self;
-    }
+        _res: Vec,
+        _highlighted: usize,
 
-    pub fn run(self: *Menu) !MenuEntry {
-        try self.draw();
+        const ConOut = protocols.SimpleTextOutputProtocol;
+        const In = protocols.SimpleTextInputProtocol;
 
-        const boot_services = uefi.system_table.boot_services.?;
+        pub fn init(entries: []const MenuEntry, out: Output, in: *In) Self {
+            var self = Self{
+                .entries = entries,
+                .out = out,
+                .in = in,
+                ._highlighted = 0,
+                ._res = Vec{ .x = 0, .y = 0 },
+            };
 
-        const input_events = [_]uefi.Event{self.in.wait_for_key};
+            _ = out.con.queryMode(out.con.mode.mode, &self._res.x, &self._res.y);
 
-        var index: usize = undefined;
-        while (boot_services.waitForEvent(input_events.len, &input_events, &index) == .Success) {
-            if (index != 0) {
-                @panic("received invalid index");
-            }
+            return self;
+        }
 
-            var key: protocols.InputKey = undefined;
-            if (self.in.readKeyStroke(&key) != .Success)
-                return error.FailedToReadKey;
-
-            switch (key.scan_code) {
-                // Up/Down arrow
-                0x01...0x02 => {
-                    // 1 (Up) -> -1, 2 (Down) -> 1
-                    // -2 [1, 2] + 3 -> [-2, -4] + 3 -> [1, -1]
-                    // 2 [1, 2] -> [2, 4] -> [-1, 1]
-                    var shift = 2 * @intCast(i8, key.scan_code) - 3;
-
-                    self._highlighted = if (self._highlighted == 0 and shift < 0)
-                        self.entries.len - @intCast(u8, -shift)
-                    else
-                        @intCast(usize, (@intCast(isize, self._highlighted) + shift)) % self.entries.len;
-                },
-
-                // Escape
-                0x17 => {
-                    panic_handler.die(.Success);
-                },
-
-                else => {},
-            }
-
-            switch (key.unicode_char) {
-                // Enter
-                0x0D => return self.entries[self._highlighted],
-
-                else => {},
-            }
-
+        pub fn run(self: *Self) !Self.MenuEntry {
             try self.draw();
-        }
 
-        unreachable;
-    }
+            const boot_services = uefi.system_table.boot_services.?;
 
-    pub fn draw(self: *const Menu) !void {
-        // Clear our screen
-        try self.out.reset(false);
+            const input_events = [_]uefi.Event{self.in.wait_for_key};
 
-        var center = Vec{ .x = @divFloor(self._res.x, 2), .y = @divFloor(self._res.y, 2) };
+            var index: usize = undefined;
+            while (boot_services.waitForEvent(input_events.len, &input_events, &index) == .Success) {
+                if (index != 0) {
+                    @panic("received invalid index");
+                }
 
-        center.y -= @divFloor(self.entries.len, 2);
+                var key: protocols.InputKey = undefined;
+                if (self.in.readKeyStroke(&key) != .Success)
+                    return error.FailedToReadKey;
 
-        for (self.entries) |entry, i| {
-            var start = center.x - @divFloor(entry.description.len, 2);
+                switch (key.scan_code) {
+                    // Up/Down arrow
+                    0x01...0x02 => {
+                        // 1 (Up) -> -1, 2 (Down) -> 1
+                        // -2 [1, 2] + 3 -> [-2, -4] + 3 -> [1, -1]
+                        // 2 [1, 2] -> [2, 4] -> [-1, 1]
+                        var shift = 2 * @intCast(i8, key.scan_code) - 3;
 
-            try self.out.setCursorPosition(start, center.y + i);
+                        self._highlighted = if (self._highlighted == 0 and shift < 0)
+                            self.entries.len - @intCast(u8, -shift)
+                        else
+                            @intCast(usize, (@intCast(isize, self._highlighted) + shift)) % self.entries.len;
+                    },
 
-            if (self._highlighted == i) {
-                _ = self.out.con.setAttribute(ConOut.background_lightgray | ConOut.black);
-            } else {
-                _ = self.out.con.setAttribute(ConOut.background_black | ConOut.white);
+                    // Escape
+                    0x17 => {
+                        panic_handler.die(.Success);
+                    },
+
+                    else => {},
+                }
+
+                switch (key.unicode_char) {
+                    // Enter
+                    0x0D => return self.entries[self._highlighted],
+
+                    else => {},
+                }
+
+                try self.draw();
             }
 
-            // try self.out.printf("{s}\r\n", .{entry.description});
-            try self.out.print16(entry.description);
-            try self.out.print("\r\n");
+            unreachable;
         }
 
-        _ = self.out.con.setAttribute(ConOut.background_black | ConOut.white);
-        try self.out.println("");
-    }
-};
+        pub fn draw(self: *const Self) !void {
+            // Clear our screen
+            try self.out.reset(false);
+
+            var center = Vec{ .x = @divFloor(self._res.x, 2), .y = @divFloor(self._res.y, 2) };
+
+            center.y -= @divFloor(self.entries.len, 2);
+
+            for (self.entries) |entry, i| {
+                var start = center.x - @divFloor(entry.description.len, 2);
+
+                try self.out.setCursorPosition(start, center.y + i);
+
+                if (self._highlighted == i) {
+                    _ = self.out.con.setAttribute(ConOut.background_lightgray | ConOut.black);
+                } else {
+                    _ = self.out.con.setAttribute(ConOut.background_black | ConOut.white);
+                }
+
+                try self.out.print16(entry.description);
+                try self.out.print("\r\n");
+            }
+
+            _ = self.out.con.setAttribute(ConOut.background_black | ConOut.white);
+            try self.out.println("");
+        }
+    };
+}
