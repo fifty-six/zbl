@@ -2,7 +2,6 @@ const std = @import("std");
 const uefi = std.os.uefi;
 
 const protocols = uefi.protocols;
-const Status = uefi.Status;
 
 const menus = @import("menu.zig");
 const output = @import("output.zig");
@@ -11,10 +10,19 @@ const text = @import("text.zig");
 const device_path = @import("device_path.zig");
 const uefi_alloc = @import("uefi_allocator.zig");
 
+const Allocator = std.mem.Allocator;
+
+const Status = uefi.Status;
+
 const Output = output.Output;
 
 const Menu = menus.Menu;
 const MenuEntry = menus.MenuEntry;
+
+const FileInfo = protocols.FileInfo;
+const FileProtocol = protocols.FileProtocol;
+const SimpleFileSystemProtocol = protocols.SimpleFileSystemProtocol;
+const DevicePathProtocol = protocols.DevicePathProtocol;
 
 const utf16_str = std.unicode.utf8ToUtf16LeStringLiteral;
 
@@ -29,7 +37,7 @@ var con_out: *protocols.SimpleTextOutputProtocol = undefined;
 pub var out: Output = undefined;
 
 var heap_alloc_state: std.heap.ArenaAllocator = undefined;
-var heap_alloc: std.mem.Allocator = undefined;
+var heap_alloc: Allocator = undefined;
 
 pub fn open_protocol(handle: uefi.Handle, comptime protocol: type) !*protocol {
     var ptr: *protocol = undefined;
@@ -50,106 +58,58 @@ pub fn open_protocol(handle: uefi.Handle, comptime protocol: type) !*protocol {
 pub const Loader = struct {
     const Self = @This();
 
-    size: usize,
-    disk: *protocols.DevicePathProtocol,
-
-    disk_name: [:0]const u16,
     file_name: [:0]const u16,
+    disk_info: DiskInfo,
 
     pub fn load_callback(ptr: ?*align(8) const anyopaque) void {
         if (ptr == null) {
             unreachable;
         }
 
-        @ptrCast(*const Loader, ptr.?).load() catch unreachable;
+        @ptrCast(*const Loader, ptr.?).load() catch |e| {
+            out.printf("{s}\r\n", .{@errorName(e)}) catch return;
+            return;
+        };
     }
 
     pub fn load(self: *const Self) !void {
         var img: ?uefi.Handle = undefined;
 
-        var disk = try device_path.file_path(heap_alloc, self.disk, self.file_name);
-        var res = boot_services.loadImage(false, uefi.handle, disk, null, 0, &img);
+        var image_path = try device_path.file_path(heap_alloc, self.disk_info.disk, self.file_name);
+        var res = boot_services.loadImage(false, uefi.handle, image_path, null, 0, &img);
 
         if (res != .Success) {
             try out.printf("{s}\r\n", .{@tagName(res)});
             return error.ImageLoadFailure;
         }
 
-        var img_proto = open_protocol(img.?, protocols.LoadedImageProtocol) catch |e| {
-            try out.printf("{s}\r\n", .{@errorName(e)});
-            return;
-        };
-
+        var img_proto = try open_protocol(img.?, protocols.LoadedImageProtocol);
         img_proto.load_options = null;
         img_proto.load_options_size = 0;
 
         if (boot_services.startImage(img.?, null, null) != .Success) {
-            try out.printf("{s}\r\n", .{@tagName(res)});
             return error.ImageStartFailure;
         }
     }
 };
 
-pub fn scan_dir(
-    alloc: std.mem.Allocator,
-    li: *std.ArrayList(Loader),
-    fp: *const protocols.FileProtocol,
-    dp: *protocols.DevicePathProtocol,
-    base_dir: [:0]const u16,
+pub const DiskInfo = struct {
+    disk: *DevicePathProtocol,
     disk_name: [:0]const u16,
-) !void {
-    var buf: [1024]u8 align(8) = undefined;
-    var size = buf.len;
-
-    _ = dp;
-
-    while (true) {
-        size = buf.len;
-
-        switch (fp.read(&size, &buf)) {
-            .Success => {},
-            .BufferTooSmall => return error.BufferTooSmall,
-            else => return error.DiskError,
-        }
-
-        if (size == 0)
-            break;
-
-        var file_info = @ptrCast(*protocols.FileInfo, &buf);
-
-        var fname = std.mem.span(file_info.getFileName());
-
-        if (std.mem.endsWith(u16, fname, utf16_str(".efi")) or std.mem.endsWith(u16, fname, utf16_str(".EFI"))) {
-            // macOS uses "._fname" for storing extended attributes on non-HFS+ filesystems.
-            if (std.mem.startsWith(u16, fname, utf16_str("._")))
-                continue;
-
-            var name: []u16 = try alloc.alloc(u16, base_dir.len + 1 + fname.len + 1);
-            name[name.len - 1] = 0;
-
-            std.mem.copy(u16, name[0..base_dir.len], base_dir);
-            std.mem.copy(u16, name[base_dir.len .. base_dir.len + 1], utf16_str("\\"));
-            std.mem.copy(u16, name[base_dir.len + 1 .. name.len], fname);
-
-            try out.print16(name[0 .. name.len - 1 :0].ptr);
-
-            try li.append(Loader{
-                .disk = dp,
-                .size = file_info.file_size,
-                .file_name = name[0 .. name.len - 1 :0],
-                .disk_name = disk_name,
-            });
-        }
-    }
-}
-
-const Directory = struct {
-    file_info: *protocols.FileInfo,
-    dir_name: [:0]const u16,
-    handle: *const protocols.FileProtocol,
 };
 
-pub fn next_dir(fp: *const protocols.FileProtocol, buf: []align(8) u8) !?Directory {
+pub fn join_paths(alloc: Allocator, prefix: [:0]const u16, suffix: [:0]const u16) ![:0]const u16 {
+    var res: []u16 = try alloc.alloc(u16, prefix.len + 1 + suffix.len + 1);
+    res[res.len - 1] = 0;
+
+    std.mem.copy(u16, res[0..prefix.len], prefix);
+    std.mem.copy(u16, res[prefix.len .. prefix.len + 1], utf16_str("\\"));
+    std.mem.copy(u16, res[prefix.len + 1 .. res.len], suffix);
+
+    return res[0 .. res.len - 1 :0];
+}
+
+pub fn scan_dir(fp: *const FileProtocol, buf: []align(8) u8) !?[:0]const u16 {
     var size = buf.len;
 
     while (true) {
@@ -164,20 +124,62 @@ pub fn next_dir(fp: *const protocols.FileProtocol, buf: []align(8) u8) !?Directo
         if (size == 0)
             break;
 
-        var file_info = @ptrCast(*protocols.FileInfo, buf.ptr);
+        var file_info = @ptrCast(*FileInfo, buf.ptr);
+
+        var fname = std.mem.span(file_info.getFileName());
+
+        if (!std.mem.endsWith(u16, fname, utf16_str(".efi")) and !std.mem.endsWith(u16, fname, utf16_str(".EFI")))
+            continue;
+
+        // macOS uses "._fname" for storing extended attributes on non-HFS+ filesystems.
+        if (std.mem.startsWith(u16, fname, utf16_str("._")))
+            continue;
+
+        return fname;
+    }
+
+    return null;
+}
+
+const Directory = struct {
+    file_info: *FileInfo,
+    dir_name: [:0]const u16,
+    handle: *const FileProtocol,
+
+    pub fn deinit(self: *const Directory) void {
+        _ = self.handle.close();
+    }
+};
+
+pub fn next_dir(fp: *const FileProtocol, buf: []align(8) u8) !?Directory {
+    var size = buf.len;
+
+    while (true) {
+        size = buf.len;
+
+        switch (fp.read(&size, buf.ptr)) {
+            .Success => {},
+            .BufferTooSmall => return error.BufferTooSmall,
+            else => return error.DiskError,
+        }
+
+        if (size == 0)
+            break;
+
+        var file_info = @ptrCast(*FileInfo, buf.ptr);
 
         var fname = std.mem.span(file_info.getFileName());
 
         if (std.mem.eql(u16, fname, utf16_str("..")) or std.mem.eql(u16, fname, utf16_str(".")))
             continue;
 
-        if ((file_info.attribute & protocols.FileInfo.efi_file_directory) != 0) {
-            var handle: *const protocols.FileProtocol = undefined;
+        if ((file_info.attribute & FileInfo.efi_file_directory) != 0) {
+            var handle: *const FileProtocol = undefined;
 
             if (fp.open(
                 &handle,
                 file_info.getFileName(),
-                protocols.FileProtocol.efi_file_mode_read,
+                FileProtocol.efi_file_mode_read,
                 0,
             ) != .Success) {
                 return error.DiskError;
@@ -192,6 +194,46 @@ pub fn next_dir(fp: *const protocols.FileProtocol, buf: []align(8) u8) !?Directo
     }
 
     return null;
+}
+
+pub fn scan_efi(
+    alloc: Allocator,
+    li: *std.ArrayList(Loader),
+    fp: *const FileProtocol,
+    disk_info: DiskInfo,
+    buf: []align(8) u8,
+) !void {
+    var efi: *const FileProtocol = undefined;
+    var res = fp.open(&efi, utf16_str("EFI"), FileProtocol.efi_file_mode_read, 0);
+
+    if (res != .Success) {
+        return;
+    }
+
+    const efi_str = utf16_str("EFI");
+
+    while (try next_dir(efi, buf)) |dir| {
+        // NOTE:
+        // dir.name and dir.file_info point into the buffer
+        // so copy them out before re-using buffer.
+        defer dir.deinit();
+
+        // Copy out the path with the prefix, as it's in the buffer which will be cleared.
+        var base_path = try join_paths(alloc, efi_str, dir.dir_name);
+        defer alloc.free(base_path);
+
+        while (try scan_dir(dir.handle, buf)) |fname| {
+            var name = try join_paths(alloc, base_path, fname);
+
+            try out.print16(name.ptr);
+            try out.print("\r\n");
+
+            try li.append(Loader{
+                .disk_info = disk_info,
+                .file_name = name,
+            });
+        }
+    }
 }
 
 pub fn main() void {
@@ -212,7 +254,7 @@ pub fn caught_main() !void {
 
     if (boot_services.locateHandleBuffer(
         .ByProtocol,
-        &protocols.SimpleFileSystemProtocol.guid,
+        &SimpleFileSystemProtocol.guid,
         null,
         &res_size,
         &handle_ptr,
@@ -223,43 +265,42 @@ pub fn caught_main() !void {
     heap_alloc_state = std.heap.ArenaAllocator.init(uefi_alloc.allocator);
     heap_alloc = heap_alloc_state.allocator();
 
-    var handles = handle_ptr[0..res_size];
+    var alloc = heap_alloc;
 
+    var handles = handle_ptr[0..res_size];
     var loaders = std.ArrayList(Loader).init(heap_alloc);
 
+    var buf: [1024]u8 align(8) = undefined;
     for (handles) |handle| {
-        var sfsp = try open_protocol(handle, protocols.SimpleFileSystemProtocol);
-        var device = try open_protocol(handle, protocols.DevicePathProtocol);
+        var sfsp = try open_protocol(handle, SimpleFileSystemProtocol);
+        var device = try open_protocol(handle, DevicePathProtocol);
 
         var fp: *const protocols.FileProtocol = undefined;
 
         if (sfsp.openVolume(&fp) != .Success)
             return error.UnableToOpenVolume;
 
-        var str_path = try device_path.to_str(heap_alloc, device);
+        var disk_info = DiskInfo{
+            .disk = device,
+            .disk_name = try device_path.to_str(alloc, device),
+        };
 
-        try scan_dir(heap_alloc, &loaders, fp, device, utf16_str(""), str_path);
+        while (try scan_dir(fp, &buf)) |fname| {
+            var name = try alloc.alloc(u16, fname.len + 1);
+            name[name.len - 1] = 0;
 
-        var efi: *const protocols.FileProtocol = undefined;
-        var res = fp.open(&efi, utf16_str("EFI"), protocols.FileProtocol.efi_file_mode_read, 0);
+            std.mem.copy(u16, name, fname);
 
-        if (res != .Success) {
-            continue;
+            try out.print16(name[0 .. name.len - 1 :0].ptr);
+            try out.print("\r\n");
+
+            try loaders.append(Loader{
+                .disk_info = disk_info,
+                .file_name = name[0 .. name.len - 1 :0],
+            });
         }
 
-        var buf: [1024]u8 align(8) = undefined;
-        while (try next_dir(efi, &buf)) |dir| {
-            var base_path = try heap_alloc.alloc(u16, 5 + dir.dir_name.len + 1);
-            var efi_str = utf16_str("\\EFI\\");
-
-            std.mem.copy(u16, base_path[0..efi_str.len], efi_str);
-            std.mem.copy(u16, base_path[efi_str.len .. base_path.len - 1], dir.dir_name);
-            base_path[base_path.len - 1] = 0;
-
-            try scan_dir(heap_alloc, &loaders, dir.handle, device, base_path[0 .. base_path.len - 1 :0], str_path);
-
-            _ = dir.handle.close();
-        }
+        try scan_efi(heap_alloc, &loaders, fp, disk_info, &buf);
     }
 
     var entries = std.ArrayList(MenuEntry).init(heap_alloc);
@@ -275,16 +316,11 @@ pub fn caught_main() !void {
             .callback = .{ .Empty = text.text },
             .data = null,
         },
-        MenuEntry{
-            .description = utf16_str("Exit"),
-            .callback = .{ .Empty = die_fast },
-            .data = null,
-        },
     });
 
     for (loaders.items) |*entry| {
         var desc = try std.mem.concat(heap_alloc, u16, &[_][]const u16{
-            entry.disk_name,
+            entry.disk_info.disk_name,
             utf16_str(": "),
             entry.file_name,
             &[_]u16{0},
@@ -296,6 +332,12 @@ pub fn caught_main() !void {
             .data = &(entry.*),
         });
     }
+
+    try entries.append(MenuEntry{
+        .description = utf16_str("Exit"),
+        .callback = .{ .Empty = die_fast },
+        .data = null,
+    });
 
     try out.reset(false);
 
