@@ -1,5 +1,0 @@
-#!/usr/bin/env bash
-
-sudo mount /dev/sdb2 /mnt
-sudo cp EFI/Boot/bootx64.* /mnt/efi/boot/
-sudo umount /mnt
