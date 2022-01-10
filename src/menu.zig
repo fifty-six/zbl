@@ -4,7 +4,7 @@ const protocols = uefi.protocols;
 const panic_handler = @import("panic.zig");
 
 const Status = uefi.Status;
-const Output = @import("output.zig").Output;
+const Output = @import("output.zig");
 
 pub const CallbackFun = union(enum) {
     Empty: fn () void,

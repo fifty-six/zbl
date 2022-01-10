@@ -4,17 +4,14 @@ const uefi = std.os.uefi;
 const protocols = uefi.protocols;
 
 const menus = @import("menu.zig");
-const output = @import("output.zig");
 const device_path = @import("device_path.zig");
 const uefi_pool_alloc = @import("uefi_pool_allocator.zig");
 const fs_info = @import("fs_info.zig");
 
+const Output = @import("output.zig");
+
 const Allocator = std.mem.Allocator;
-
 const Status = uefi.Status;
-
-const Output = output.Output;
-
 const Menu = menus.Menu;
 
 const FileInfo = protocols.FileInfo;
