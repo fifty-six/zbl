@@ -8,7 +8,7 @@ const device_path = @import("device_path.zig");
 const uefi_pool_alloc = @import("uefi_pool_allocator.zig");
 const fs_info = @import("fs_info.zig");
 
-const Output = @import("output.zig");
+const Output = @import("Output.zig");
 
 const Allocator = std.mem.Allocator;
 const Status = uefi.Status;

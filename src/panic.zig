@@ -5,7 +5,7 @@ const Status = uefi.Status;
 
 const SimpleTextOutputProtocol = uefi.protocols.SimpleTextOutputProtocol;
 
-const Output = @import("output.zig");
+const Output = @import("Output.zig");
 
 var already_panicking: bool = false;
 
