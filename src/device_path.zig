@@ -54,7 +54,8 @@ pub fn file_path(
 ) !*DevicePathProtocol {
     var size = dpp_size(dpp);
 
-    var buf = try alloc.alloc(u8, size + path.len + 1 + @sizeOf(DevicePathProtocol));
+    // u16 of path + null terminator -> 2 * (path.len + 1)
+    var buf = try alloc.alloc(u8, size + 2 * (path.len + 1) + @sizeOf(DevicePathProtocol));
 
     std.mem.copy(u8, buf, @ptrCast([*]u8, dpp)[0..size]);
 
