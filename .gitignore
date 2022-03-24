@@ -1,3 +1,10 @@
+# stuff
+a.img
+a.out
+test.zig
+initramfs*
+vmlinuz*
+
 # build results
 *.efi
 *.obj

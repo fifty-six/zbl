@@ -18,29 +18,41 @@ pub fn die(status: Status) noreturn {
     uefi.system_table.runtime_services.resetSystem(.ResetShutdown, status, 0, null);
 }
 
+const Reset = enum { Clear, Unchanged };
+
+pub fn print_to(out: Output, msg: []const u8, reset: Reset) void {
+    _ = out.con.setAttribute(SimpleTextOutputProtocol.red);
+
+    if (reset == .Clear) {
+        out.reset(false) catch {};
+    }
+
+    out.printf("\r\nerr: {s}\r\n", .{msg}) catch {};
+    out.println("Press any key to stop.") catch {};
+}
+
 pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace) noreturn {
     @setCold(true);
 
     // Don't have DWARF info.
     _ = error_return_trace;
 
-    const out = Output{ .con = uefi.system_table.std_err.? };
+    const stdout = Output{ .con = uefi.system_table.con_out.? };
 
     if (already_panicking) {
         // Eat the error this time if there is one, doesn't matter.
-        out.println("Panicked during panic!") catch {};
+        stdout.println("Panicked during panic!") catch {};
+        // stderr.println("Panicked during panic!") catch {};
 
         asm volatile ("hlt");
 
         while (true) {}
     }
 
-    _ = out.con.setAttribute(SimpleTextOutputProtocol.red);
-
-    // out.reset(false) catch unreachable;
-
-    out.printf("\r\nerr: {s}\r\n", .{msg}) catch unreachable;
-    out.println("Press any key to stop.") catch unreachable;
+    if (uefi.system_table.std_err) |stderr| {
+        print_to(Output{ .con = stderr }, msg, .Clear);
+    }
+    print_to(stdout, msg, .Clear);
 
     const input_events = [_]uefi.Event{uefi.system_table.con_in.?.wait_for_key};
 

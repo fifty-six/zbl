@@ -34,6 +34,11 @@ pub fn printf(self: *const Self, comptime format: []const u8, args: anytype) !vo
     try err(self.con.outputString(&utf16));
 }
 
+pub fn print16ln(self: *const Self, buf: [*:0]const u16) !void {
+    try self.print16(buf);
+    try self.print("\r\n");
+}
+
 pub fn println(self: *const Self, comptime buf: []const u8) !void {
     try self.print(buf ++ "\r\n");
 }

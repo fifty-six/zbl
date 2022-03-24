@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const uefi = std.os.uefi;
 
 const protocols = uefi.protocols;
@@ -16,11 +17,13 @@ const Menu = menus.Menu;
 
 const FileInfo = protocols.FileInfo;
 const FileProtocol = protocols.FileProtocol;
+const LoadedImageProtocol = protocols.LoadedImageProtocol;
 const SimpleFileSystemProtocol = protocols.SimpleFileSystemProtocol;
 const DevicePathProtocol = protocols.DevicePathProtocol;
 const FileSystemInfo = fs_info.FileSystemInfo;
 
 const utf16_str = std.unicode.utf8ToUtf16LeStringLiteral;
+const utf16_strZ = std.unicode.utf8ToUtf16LeStringLiteral;
 
 var sys_table: *uefi.tables.SystemTable = undefined;
 var boot_services: *uefi.tables.BootServices = undefined;
@@ -33,35 +36,44 @@ var pool_alloc: Allocator = undefined;
 
 const exceptions = [_][:0]const u16{
     // Windows bootloader
-    utf16_str("EFI\\Microsoft\\Boot\\bootmgfw.efi"),
+    utf16_strZ("EFI\\Microsoft\\Boot\\bootmgfw.efi"),
     // Mac bootloader
-    utf16_str("System\\Library\\CoreServices\\boot.efi"),
+    utf16_strZ("System\\Library\\CoreServices\\boot.efi"),
 };
 
-pub fn open_protocol(handle: uefi.Handle, comptime protocol: type) !*protocol {
-    var ptr: *protocol = undefined;
-    if (boot_services.openProtocol(
-        handle,
-        &protocol.guid,
-        @ptrCast(*?*anyopaque, &ptr),
-        // Invoking handle is our loaded image as we're a UEFI application
-        uefi.handle,
-        // Controller handle (null as we're not a driver)
-        null,
-        uefi.tables.OpenProtocolAttributes{ .by_handle_protocol = true },
-    ) != .Success) {
-        return error.ProtocolOpenFailure;
-    }
+const kernel_patterns = [_][:0]const u16{
+    utf16_str("vmlinuz-"),
+};
 
-    return ptr;
-}
+// { 03 79 BE 4E - D7 06 - 43 7d - B0 37 -ED B8 2F B7 72 A4}
+const block_io_protocol_guid align(8) = uefi.Guid{
+    .time_low = 0x0379be4e,
+    .time_mid = 0xd706,
+    .time_high_and_version = 0x437d,
+    .clock_seq_high_and_reserved = 0xb0,
+    .clock_seq_low = 0x37,
+    .node = [_]u8{ 0xed, 0xb8, 0x2f, 0xb7, 0x72, 0xa4 },
+};
+
+const root_partition_guid = switch (builtin.cpu.arch) {
+    // 4f 68 bc e3 -e8 cd-4d b1-96 e7-fb ca f9 84 b7 09
+    .x86_64 => uefi.Guid{
+        .time_low = 0x4f68bce3,
+        .time_mid = 0xe8cd,
+        .time_high_and_version = 0x4db1,
+        .clock_seq_high_and_reserved = 0x96,
+        .clock_seq_low = 0xe7,
+        .node = [_]u8{ 0xfb, 0xca, 0xf9, 0x84, 0xb7, 0x09 },
+    },
+    else => @compileError("unsupported architecture"),
+};
 
 pub const MenuError = error{
     GetVariableFailure,
     SetVariableFailure,
 } || Loader.LoaderError;
 
-pub fn reboot_into_firmware() MenuError!void {
+pub fn reboot_into_firmware() !void {
     const nonvolatile_access = 0x01;
     const bootservice_access = 0x02;
     const runtime_access = 0x04;
@@ -74,16 +86,14 @@ pub fn reboot_into_firmware() MenuError!void {
     var size: usize = @sizeOf(usize);
     var os_ind: usize = undefined;
 
-    if (rs.getVariable(utf16_str("OsIndications"), global_var, null, &size, &os_ind) != .Success)
-        return error.GetVariableFailure;
+    try rs.getVariable(utf16_str("OsIndications"), global_var, null, &size, &os_ind).err();
 
     if ((os_ind & boot_to_firmware) == 0) {
         var attrs: u32 = runtime_access | bootservice_access | nonvolatile_access;
 
         os_ind |= boot_to_firmware;
 
-        if (rs.setVariable(utf16_str("OsIndications"), global_var, attrs, @sizeOf(usize), &os_ind) != .Success)
-            return error.SetVariableFailure;
+        try rs.setVariable(utf16_str("OsIndications"), global_var, attrs, @sizeOf(usize), &os_ind).err();
     }
 
     uefi.system_table.runtime_services.resetSystem(.ResetCold, .Success, 0, null);
@@ -94,32 +104,34 @@ pub const Loader = struct {
 
     file_name: [:0]const u16,
     disk_info: DiskInfo,
+    args: ?[:0]u16 = null,
 
     pub const LoaderError = error{
-        ImageStartFailure,
-        ImageLoadFailure,
         OutOfMemory,
-        ProtocolOpenFailure,
-    };
+    } || Status.EfiError;
 
     pub fn load(self: *const Self) LoaderError!void {
         var img: ?uefi.Handle = undefined;
 
         var image_path = try device_path.file_path(pool_alloc, self.disk_info.disk, self.file_name);
-        var res = boot_services.loadImage(false, uefi.handle, image_path, null, 0, &img);
+        try boot_services.loadImage(false, uefi.handle, image_path, null, 0, &img).err();
 
-        if (res != .Success) {
-            out.printf("{s}\r\n", .{@tagName(res)}) catch return;
-            return error.ImageLoadFailure;
+        var img_proto = try boot_services.openProtocolSt(LoadedImageProtocol, img.?);
+
+        if (self.args) |options| {
+            out.print("options: ") catch {};
+            out.print16ln(options) catch {};
+
+            _ = boot_services.stall(2 * 1000);
+
+            img_proto.load_options = options.ptr;
+            img_proto.load_options_size = @intCast(u32, (options.len + 1) * @sizeOf(u16));
+        } else {
+            img_proto.load_options = null;
+            img_proto.load_options_size = 0;
         }
 
-        var img_proto = try open_protocol(img.?, protocols.LoadedImageProtocol);
-        img_proto.load_options = null;
-        img_proto.load_options_size = 0;
-
-        if (boot_services.startImage(img.?, null, null) != .Success) {
-            return error.ImageStartFailure;
-        }
+        try boot_services.startImage(img.?, null, null).err();
     }
 };
 
@@ -145,16 +157,15 @@ pub fn scan_dir(fp: *const FileProtocol, buf: []align(8) u8) !?[:0]const u16 {
     while (true) {
         size = buf.len;
 
-        switch (fp.read(&size, buf.ptr)) {
-            .Success => {},
-            .BufferTooSmall => return error.BufferTooSmall,
-            else => return error.DiskError,
-        }
+        try fp.read(&size, buf.ptr).err();
 
         if (size == 0)
             break;
 
         var file_info = @ptrCast(*FileInfo, buf.ptr);
+
+        if ((file_info.attribute & FileInfo.efi_file_directory) != 0)
+            continue;
 
         var fname = std.mem.span(file_info.getFileName());
 
@@ -169,6 +180,192 @@ pub fn scan_dir(fp: *const FileProtocol, buf: []align(8) u8) !?[:0]const u16 {
     }
 
     return null;
+}
+
+pub fn read_conf(
+    alloc: Allocator,
+    fp: *const FileProtocol,
+    kernel: []const u16,
+) ![]const u16 {
+    var conf_name = try std.mem.concat(
+        alloc,
+        u16,
+        &[_][]const u16{
+            kernel,
+            utf16_str(".conf"),
+            &[_]u16{0},
+        },
+    );
+    defer alloc.free(conf_name);
+
+    var conf_sentinel = conf_name[0 .. conf_name.len - 1 :0];
+
+    var efp: *FileProtocol = undefined;
+
+    try fp.open(&efp, conf_sentinel, FileProtocol.efi_file_mode_read, 0).err();
+
+    var utf8 = try efp.reader().readAllAlloc(alloc, 1024 * 1024);
+
+    if (std.mem.endsWith(u8, utf8, "\r\n")) {
+        utf8 = utf8[0 .. utf8.len - 2];
+    }
+
+    if (std.mem.endsWith(u8, utf8, "\n")) {
+        utf8 = utf8[0 .. utf8.len - 1];
+    }
+
+    return try std.unicode.utf8ToUtf16LeWithNull(alloc, utf8);
+}
+
+pub fn find_initrd(
+    alloc: Allocator,
+    fp: *const FileProtocol,
+    name: []const u16,
+) ![]const u16 {
+    var initrd_name = try std.mem.concat(
+        alloc,
+        u16,
+        &[_][]const u16{
+            utf16_str("initramfs-"),
+            name,
+            utf16_str(".img"),
+            &[_]u16{0},
+        },
+    );
+    errdefer alloc.free(initrd_name);
+
+    var initrd = initrd_name[0 .. initrd_name.len - 1 :0];
+
+    var efp: *const FileProtocol = undefined;
+
+    // Check that initrd-(...) exists
+    try fp.open(&efp, initrd, FileProtocol.efi_file_mode_read, 0).err();
+
+    // Return it without the null terminator for concat purposes
+    return initrd_name[0 .. initrd_name.len - 1];
+}
+
+pub fn find_linux_root(
+    alloc: Allocator,
+    handles: []uefi.Handle,
+    buf: []align(8) u8,
+) !void {
+    _ = alloc;
+    _ = buf;
+
+    var root_guid: [16]u8 = undefined;
+
+    std.mem.copy(u8, &root_guid, std.mem.asBytes(&root_partition_guid));
+
+    try out.printf("required guid:           {any}\r\n", .{root_guid});
+
+    for (handles) |handle| {
+        var root_device = boot_services.openProtocolSt(DevicePathProtocol, handle) catch {
+            try out.println("how tf");
+            continue;
+        };
+
+        var device: ?*DevicePathProtocol = root_device;
+
+        var str = try device_path.to_str(alloc, root_device);
+        try out.print16ln(str);
+        alloc.free(str);
+
+        while (device) |d| : (device = d.next()) {
+            var path = d.getDevicePath() orelse continue;
+
+            var media = switch (path) {
+                .Media => |m| m,
+                else => continue,
+            };
+
+            var hdd = switch (media) {
+                .HardDrive => |h| h,
+                else => continue,
+            };
+
+            try out.printf("{} \r\n", .{hdd.signature_type});
+            try out.printf("hdd partition signature: {any}\r\n", .{hdd.partition_signature});
+
+            if (std.mem.eql(
+                u8,
+                @ptrCast(*const [16]u8, &root_partition_guid),
+                &hdd.partition_signature,
+            )) {
+                try out.println("among us");
+            }
+        }
+    }
+}
+
+pub fn add_kernel(
+    alloc: Allocator,
+    fp: *const FileProtocol,
+    kernel: [:0]u16,
+    name: []u16,
+) ![]u16 {
+    var init = try find_initrd(alloc, fp, name);
+    defer alloc.free(init);
+
+    var conf = try read_conf(alloc, fp, kernel[0..kernel.len]);
+    var args = try std.mem.concat(alloc, u16, &[_][]const u16{
+        conf,
+        utf16_str(" initrd="),
+        init,
+        &[_]u16{0},
+    });
+
+    return args;
+}
+
+pub fn find_linux_kernels(
+    alloc: Allocator,
+    li: *std.ArrayList(Loader),
+    fp: *const FileProtocol,
+    disk_info: DiskInfo,
+    buf: []align(8) u8,
+) !void {
+    var size = buf.len;
+
+    // Reset the position as we've already scanned
+    // past everything while detecting .efi loaders
+    try fp.setPosition(0).err();
+
+    while (true) {
+        size = buf.len;
+
+        try fp.read(&size, buf.ptr).err();
+
+        if (size == 0)
+            break;
+
+        var file_info = @ptrCast(*FileInfo, buf.ptr);
+
+        if ((file_info.attribute & FileInfo.efi_file_directory) != 0)
+            continue;
+
+        var fname = std.mem.span(file_info.getFileName());
+
+        for (kernel_patterns) |pat| {
+            if (!std.mem.startsWith(u16, fname, pat)) {
+                continue;
+            }
+
+            // Gotta copy out of the buffer.
+            var kernel = try alloc.dupeZ(u16, fname);
+
+            // Go to the end because we have a sentinel-terminated ptr already
+            var name = kernel[pat.len.. :0];
+
+            var args = add_kernel(alloc, fp, kernel, name) catch continue;
+
+            try li.append(Loader{
+                .disk_info = disk_info,
+                .file_name = kernel,
+                .args = args[0 .. args.len - 1 :0],
+            });
+        }
+    }
 }
 
 const Directory = struct {
@@ -187,11 +384,7 @@ pub fn next_dir(fp: *const FileProtocol, buf: []align(8) u8) !?Directory {
     while (true) {
         size = buf.len;
 
-        switch (fp.read(&size, buf.ptr)) {
-            .Success => {},
-            .BufferTooSmall => return error.BufferTooSmall,
-            else => return error.DiskError,
-        }
+        try fp.read(&size, buf.ptr).err();
 
         if (size == 0)
             break;
@@ -206,14 +399,7 @@ pub fn next_dir(fp: *const FileProtocol, buf: []align(8) u8) !?Directory {
         if ((file_info.attribute & FileInfo.efi_file_directory) != 0) {
             var handle: *const FileProtocol = undefined;
 
-            if (fp.open(
-                &handle,
-                file_info.getFileName(),
-                FileProtocol.efi_file_mode_read,
-                0,
-            ) != .Success) {
-                return error.DiskError;
-            }
+            try fp.open(&handle, file_info.getFileName(), FileProtocol.efi_file_mode_read, 0).err();
 
             return Directory{
                 .file_info = file_info,
@@ -234,11 +420,10 @@ pub fn scan_efi(
     buf: []align(8) u8,
 ) !void {
     var efi: *const FileProtocol = undefined;
-    var res = fp.open(&efi, utf16_str("EFI"), FileProtocol.efi_file_mode_read, 0);
 
-    if (res != .Success) {
+    fp.open(&efi, utf16_str("EFI"), FileProtocol.efi_file_mode_read, 0).err() catch {
         return;
-    }
+    };
 
     const efi_str = utf16_str("EFI");
 
@@ -276,41 +461,44 @@ pub fn caught_main() !void {
 
     try out.reset(false);
 
-    var handle_ptr: [*]uefi.Handle = undefined;
-    var res_size: usize = undefined;
-
-    if (boot_services.locateHandleBuffer(
-        .ByProtocol,
-        &SimpleFileSystemProtocol.guid,
-        null,
-        &res_size,
-        &handle_ptr,
-    ) != .Success) {
-        return error.EnumerateHandleFailure;
-    }
-
     pool_alloc_state = std.heap.ArenaAllocator.init(uefi_pool_alloc.allocator);
     pool_alloc = pool_alloc_state.allocator();
 
     var alloc = pool_alloc;
 
-    var handles = handle_ptr[0..res_size];
+    var handles = blk: {
+        var handle_ptr: [*]uefi.Handle = undefined;
+        var res_size: usize = undefined;
+
+        try boot_services.locateHandleBuffer(
+            .ByProtocol,
+            &SimpleFileSystemProtocol.guid,
+            null,
+            &res_size,
+            &handle_ptr,
+        ).err();
+
+        break :blk handle_ptr[0..res_size];
+    };
+    defer uefi.raw_pool_allocator.free(handles);
+
     var loaders = std.ArrayList(Loader).init(alloc);
 
     var buf: [1024]u8 align(8) = undefined;
+
+    // try find_linux_root(alloc, handles, &buf);
+
     for (handles) |handle| {
-        var sfsp = try open_protocol(handle, SimpleFileSystemProtocol);
-        var device = try open_protocol(handle, DevicePathProtocol);
+        var sfsp = try boot_services.openProtocolSt(SimpleFileSystemProtocol, handle);
+        var device = try boot_services.openProtocolSt(DevicePathProtocol, handle);
 
         var fp: *const FileProtocol = undefined;
 
-        if (sfsp.openVolume(&fp) != .Success)
-            return error.UnableToOpenVolume;
+        try sfsp.openVolume(&fp).err();
 
         var size = buf.len;
 
-        if (fp.getInfo(&FileSystemInfo.guid, &size, &buf) != .Success)
-            return error.UnableToGetInfo;
+        try fp.getInfo(&FileSystemInfo.guid, &size, &buf).err();
 
         var info = @ptrCast(*FileSystemInfo, &buf);
         // Have to dupe the label as its from the buffer, which we'll overwrite.
@@ -334,13 +522,16 @@ pub fn caught_main() !void {
             });
         }
 
+        try find_linux_kernels(alloc, &loaders, fp, disk_info, &buf);
+
         try scan_efi(alloc, &loaders, fp, disk_info, &buf);
 
         for (exceptions) |exception| {
             var efp: *const FileProtocol = undefined;
 
-            if (fp.open(&efp, exception, FileProtocol.efi_file_mode_read, 0) != .Success)
+            fp.open(&efp, exception, FileProtocol.efi_file_mode_read, 0).err() catch {
                 continue;
+            };
 
             try loaders.append(Loader{
                 .disk_info = disk_info,
@@ -352,6 +543,8 @@ pub fn caught_main() !void {
     const LoaderMenu = Menu(Loader, MenuError);
     const MenuEntry = LoaderMenu.MenuEntry;
     var entries = std.ArrayList(MenuEntry).init(alloc);
+
+    try out.println("creating entires");
 
     for (loaders.items) |*entry| {
         var desc = try std.mem.concat(alloc, u16, &[_][]const u16{
@@ -380,7 +573,7 @@ pub fn caught_main() !void {
         .callback = .{ .Empty = die_fast },
     });
 
-    try out.reset(false);
+    // try out.reset(false);
 
     var menu = LoaderMenu.init(entries.items, out, con_in);
 
