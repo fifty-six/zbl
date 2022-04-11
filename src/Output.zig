@@ -23,8 +23,10 @@ pub fn print(self: *const Self, comptime buf: []const u8) !void {
 }
 
 pub fn printf(self: *const Self, comptime format: []const u8, args: anytype) !void {
-    var utf16: [256:0]u16 = undefined;
-    var format_buf: [256]u8 = undefined;
+    // var utf16: [256:0]u16 = undefined;
+    // var format_buf: [256]u8 = undefined;
+    var utf16: [2048:0]u16 = undefined;
+    var format_buf: [2048]u8 = undefined;
 
     var slice = try std.fmt.bufPrint(&format_buf, format, args);
     var length = try std.unicode.utf8ToUtf16Le(&utf16, slice);

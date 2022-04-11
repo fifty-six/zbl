@@ -13,14 +13,14 @@ pub const CallbackFun = union(enum) {
 
 const Vec = struct { x: usize, y: usize };
 
-pub fn Menu(comptime T: type, comptime err: type) type {
+pub fn Menu(comptime err: type) type {
     return struct {
         const Self = @This();
 
         pub const MenuEntry = struct {
             const DataCallback = struct {
-                fun: fn (*const T) err!void,
-                data: *const T,
+                fun: fn (*anyopaque) err!void,
+                data: *anyopaque,
             };
 
             const Callback = union(enum) {
@@ -56,7 +56,34 @@ pub fn Menu(comptime T: type, comptime err: type) type {
             return self;
         }
 
-        pub fn run(self: *Self) !Self.MenuEntry {
+        pub fn run(self: *Self) !void {
+            while (true) {
+                var entry = try self.next();
+
+                var callback_error = switch (entry.callback) {
+                    .WithData => |info| blk: {
+                        break :blk info.fun(info.data);
+                    },
+                    .Empty => |fun| blk: {
+                        break :blk fun();
+                    },
+                };
+
+                callback_error catch |e| {
+                    try self.out.reset(false);
+
+                    try self.out.printf("error in menu callback: {s}\r\n", .{@errorName(e)});
+                    _ = @import("main.zig").boot_services.stall(1000 * 1000);
+
+                    try self.out.reset(false);
+                    continue;
+                };
+
+                unreachable;
+            }
+        }
+
+        pub fn next(self: *Self) !Self.MenuEntry {
             try self.draw();
 
             const boot_services = uefi.system_table.boot_services.?;

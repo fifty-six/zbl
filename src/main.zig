@@ -8,6 +8,7 @@ const menus = @import("menu.zig");
 const device_path = @import("device_path.zig");
 const uefi_pool_alloc = @import("uefi_pool_allocator.zig");
 const fs_info = @import("fs_info.zig");
+const linux = @import("linux.zig");
 
 const Output = @import("Output.zig");
 
@@ -23,54 +24,32 @@ const DevicePathProtocol = protocols.DevicePathProtocol;
 const FileSystemInfo = fs_info.FileSystemInfo;
 
 const utf16_str = std.unicode.utf8ToUtf16LeStringLiteral;
-const utf16_strZ = std.unicode.utf8ToUtf16LeStringLiteral;
+
+pub export var boot_services: *uefi.tables.BootServices = undefined;
+
+pub var out: Output = undefined;
 
 var sys_table: *uefi.tables.SystemTable = undefined;
-var boot_services: *uefi.tables.BootServices = undefined;
 var con_in: *protocols.SimpleTextInputProtocol = undefined;
 var con_out: *protocols.SimpleTextOutputProtocol = undefined;
-var out: Output = undefined;
 
 var pool_alloc_state: std.heap.ArenaAllocator = undefined;
 var pool_alloc: Allocator = undefined;
 
 const exceptions = [_][:0]const u16{
     // Windows bootloader
-    utf16_strZ("EFI\\Microsoft\\Boot\\bootmgfw.efi"),
+    utf16_str("EFI\\Microsoft\\Boot\\bootmgfw.efi"),
     // Mac bootloader
-    utf16_strZ("System\\Library\\CoreServices\\boot.efi"),
-};
-
-const kernel_patterns = [_][:0]const u16{
-    utf16_str("vmlinuz-"),
-};
-
-// { 03 79 BE 4E - D7 06 - 43 7d - B0 37 -ED B8 2F B7 72 A4}
-const block_io_protocol_guid align(8) = uefi.Guid{
-    .time_low = 0x0379be4e,
-    .time_mid = 0xd706,
-    .time_high_and_version = 0x437d,
-    .clock_seq_high_and_reserved = 0xb0,
-    .clock_seq_low = 0x37,
-    .node = [_]u8{ 0xed, 0xb8, 0x2f, 0xb7, 0x72, 0xa4 },
-};
-
-const root_partition_guid = switch (builtin.cpu.arch) {
-    // 4f 68 bc e3 -e8 cd-4d b1-96 e7-fb ca f9 84 b7 09
-    .x86_64 => uefi.Guid{
-        .time_low = 0x4f68bce3,
-        .time_mid = 0xe8cd,
-        .time_high_and_version = 0x4db1,
-        .clock_seq_high_and_reserved = 0x96,
-        .clock_seq_low = 0xe7,
-        .node = [_]u8{ 0xfb, 0xca, 0xf9, 0x84, 0xb7, 0x09 },
-    },
-    else => @compileError("unsupported architecture"),
+    utf16_str("System\\Library\\CoreServices\\boot.efi"),
 };
 
 pub const MenuError = error{
     GetVariableFailure,
     SetVariableFailure,
+    UnknownGlyph,
+    NoSpaceLeft,
+    FailedToReadKey,
+    InvalidUtf8,
 } || Loader.LoaderError;
 
 pub fn reboot_into_firmware() !void {
@@ -109,6 +88,12 @@ pub const Loader = struct {
     pub const LoaderError = error{
         OutOfMemory,
     } || Status.EfiError;
+
+    pub fn wrapped_load(opaque_ptr: *anyopaque) LoaderError!void {
+        var self = @ptrCast(*Self, @alignCast(@alignOf(Self), opaque_ptr));
+
+        try self.load();
+    }
 
     pub fn load(self: *const Self) LoaderError!void {
         var img: ?uefi.Handle = undefined;
@@ -180,192 +165,6 @@ pub fn scan_dir(fp: *const FileProtocol, buf: []align(8) u8) !?[:0]const u16 {
     }
 
     return null;
-}
-
-pub fn read_conf(
-    alloc: Allocator,
-    fp: *const FileProtocol,
-    kernel: []const u16,
-) ![]const u16 {
-    var conf_name = try std.mem.concat(
-        alloc,
-        u16,
-        &[_][]const u16{
-            kernel,
-            utf16_str(".conf"),
-            &[_]u16{0},
-        },
-    );
-    defer alloc.free(conf_name);
-
-    var conf_sentinel = conf_name[0 .. conf_name.len - 1 :0];
-
-    var efp: *FileProtocol = undefined;
-
-    try fp.open(&efp, conf_sentinel, FileProtocol.efi_file_mode_read, 0).err();
-
-    var utf8 = try efp.reader().readAllAlloc(alloc, 1024 * 1024);
-
-    if (std.mem.endsWith(u8, utf8, "\r\n")) {
-        utf8 = utf8[0 .. utf8.len - 2];
-    }
-
-    if (std.mem.endsWith(u8, utf8, "\n")) {
-        utf8 = utf8[0 .. utf8.len - 1];
-    }
-
-    return try std.unicode.utf8ToUtf16LeWithNull(alloc, utf8);
-}
-
-pub fn find_initrd(
-    alloc: Allocator,
-    fp: *const FileProtocol,
-    name: []const u16,
-) ![]const u16 {
-    var initrd_name = try std.mem.concat(
-        alloc,
-        u16,
-        &[_][]const u16{
-            utf16_str("initramfs-"),
-            name,
-            utf16_str(".img"),
-            &[_]u16{0},
-        },
-    );
-    errdefer alloc.free(initrd_name);
-
-    var initrd = initrd_name[0 .. initrd_name.len - 1 :0];
-
-    var efp: *const FileProtocol = undefined;
-
-    // Check that initrd-(...) exists
-    try fp.open(&efp, initrd, FileProtocol.efi_file_mode_read, 0).err();
-
-    // Return it without the null terminator for concat purposes
-    return initrd_name[0 .. initrd_name.len - 1];
-}
-
-pub fn find_linux_root(
-    alloc: Allocator,
-    handles: []uefi.Handle,
-    buf: []align(8) u8,
-) !void {
-    _ = alloc;
-    _ = buf;
-
-    var root_guid: [16]u8 = undefined;
-
-    std.mem.copy(u8, &root_guid, std.mem.asBytes(&root_partition_guid));
-
-    try out.printf("required guid:           {any}\r\n", .{root_guid});
-
-    for (handles) |handle| {
-        var root_device = boot_services.openProtocolSt(DevicePathProtocol, handle) catch {
-            try out.println("how tf");
-            continue;
-        };
-
-        var device: ?*DevicePathProtocol = root_device;
-
-        var str = try device_path.to_str(alloc, root_device);
-        try out.print16ln(str);
-        alloc.free(str);
-
-        while (device) |d| : (device = d.next()) {
-            var path = d.getDevicePath() orelse continue;
-
-            var media = switch (path) {
-                .Media => |m| m,
-                else => continue,
-            };
-
-            var hdd = switch (media) {
-                .HardDrive => |h| h,
-                else => continue,
-            };
-
-            try out.printf("{} \r\n", .{hdd.signature_type});
-            try out.printf("hdd partition signature: {any}\r\n", .{hdd.partition_signature});
-
-            if (std.mem.eql(
-                u8,
-                @ptrCast(*const [16]u8, &root_partition_guid),
-                &hdd.partition_signature,
-            )) {
-                try out.println("among us");
-            }
-        }
-    }
-}
-
-pub fn add_kernel(
-    alloc: Allocator,
-    fp: *const FileProtocol,
-    kernel: [:0]u16,
-    name: []u16,
-) ![]u16 {
-    var init = try find_initrd(alloc, fp, name);
-    defer alloc.free(init);
-
-    var conf = try read_conf(alloc, fp, kernel[0..kernel.len]);
-    var args = try std.mem.concat(alloc, u16, &[_][]const u16{
-        conf,
-        utf16_str(" initrd="),
-        init,
-        &[_]u16{0},
-    });
-
-    return args;
-}
-
-pub fn find_linux_kernels(
-    alloc: Allocator,
-    li: *std.ArrayList(Loader),
-    fp: *const FileProtocol,
-    disk_info: DiskInfo,
-    buf: []align(8) u8,
-) !void {
-    var size = buf.len;
-
-    // Reset the position as we've already scanned
-    // past everything while detecting .efi loaders
-    try fp.setPosition(0).err();
-
-    while (true) {
-        size = buf.len;
-
-        try fp.read(&size, buf.ptr).err();
-
-        if (size == 0)
-            break;
-
-        var file_info = @ptrCast(*FileInfo, buf.ptr);
-
-        if ((file_info.attribute & FileInfo.efi_file_directory) != 0)
-            continue;
-
-        var fname = std.mem.span(file_info.getFileName());
-
-        for (kernel_patterns) |pat| {
-            if (!std.mem.startsWith(u16, fname, pat)) {
-                continue;
-            }
-
-            // Gotta copy out of the buffer.
-            var kernel = try alloc.dupeZ(u16, fname);
-
-            // Go to the end because we have a sentinel-terminated ptr already
-            var name = kernel[pat.len.. :0];
-
-            var args = add_kernel(alloc, fp, kernel, name) catch continue;
-
-            try li.append(Loader{
-                .disk_info = disk_info,
-                .file_name = kernel,
-                .args = args[0 .. args.len - 1 :0],
-            });
-        }
-    }
 }
 
 const Directory = struct {
@@ -484,9 +283,30 @@ pub fn caught_main() !void {
 
     var loaders = std.ArrayList(Loader).init(alloc);
 
-    var buf: [1024]u8 align(8) = undefined;
+    // var map_maybe = linux.find_roots(alloc) catch |e| blk: {
+    //     try out.printf("caught in root: {s}\r\n", .{@errorName(e)});
+    //     _ = boot_services.stall(1000 * 1000);
+    //     break :blk null;
+    // };
 
-    // try find_linux_root(alloc, handles, &buf);
+    // if (map_maybe) |map| {
+    //     var it = map.iterator();
+
+    //     while (it.next()) |entry| {
+    //         try out.printf("{}: ", .{entry.key_ptr.*});
+    //         try out.print16ln(entry.value_ptr.*.ptr);
+
+    //         _ = boot_services.stall(1000 * 1000);
+    //     }
+    // }
+
+    // const LoaderMenu = Menu(Loader, MenuError);
+    const LoaderMenu = Menu(MenuError);
+    const MenuEntry = LoaderMenu.MenuEntry;
+
+    var entries = std.ArrayList(MenuEntry).init(alloc);
+
+    var buf: [1024]u8 align(8) = undefined;
 
     for (handles) |handle| {
         var sfsp = try boot_services.openProtocolSt(SimpleFileSystemProtocol, handle);
@@ -522,7 +342,7 @@ pub fn caught_main() !void {
             });
         }
 
-        try find_linux_kernels(alloc, &loaders, fp, disk_info, &buf);
+        try linux.find_kernels(alloc, &loaders, &entries, fp, disk_info, &buf);
 
         try scan_efi(alloc, &loaders, fp, disk_info, &buf);
 
@@ -540,10 +360,6 @@ pub fn caught_main() !void {
         }
     }
 
-    const LoaderMenu = Menu(Loader, MenuError);
-    const MenuEntry = LoaderMenu.MenuEntry;
-    var entries = std.ArrayList(MenuEntry).init(alloc);
-
     try out.println("creating entires");
 
     for (loaders.items) |*entry| {
@@ -557,7 +373,7 @@ pub fn caught_main() !void {
         try entries.append(MenuEntry{
             .description = desc[0 .. desc.len - 1 :0],
             .callback = .{ .WithData = .{
-                .fun = Loader.load,
+                .fun = Loader.wrapped_load,
                 .data = entry,
             } },
         });
@@ -578,7 +394,7 @@ pub fn caught_main() !void {
     var menu = LoaderMenu.init(entries.items, out, con_in);
 
     while (true) {
-        var entry = try menu.run();
+        var entry = try menu.next();
 
         var err = switch (entry.callback) {
             .WithData => |info| blk: {
