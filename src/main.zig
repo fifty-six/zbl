@@ -6,7 +6,6 @@ const protocols = uefi.protocols;
 
 const menus = @import("menu.zig");
 const device_path = @import("device_path.zig");
-const uefi_pool_alloc = @import("uefi_pool_allocator.zig");
 const fs_info = @import("fs_info.zig");
 const linux = @import("linux.zig");
 const gpt = @import("gpt.zig");
@@ -266,7 +265,7 @@ pub fn caught_main() !void {
 
     try out.reset(false);
 
-    pool_alloc_state = std.heap.ArenaAllocator.init(uefi_pool_alloc.allocator);
+    pool_alloc_state = std.heap.ArenaAllocator.init(uefi.pool_allocator);
     pool_alloc = pool_alloc_state.allocator();
 
     var alloc = pool_alloc;
