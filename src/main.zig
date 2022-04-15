@@ -9,12 +9,15 @@ const device_path = @import("device_path.zig");
 const uefi_pool_alloc = @import("uefi_pool_allocator.zig");
 const fs_info = @import("fs_info.zig");
 const linux = @import("linux.zig");
+const gpt = @import("gpt.zig");
 
 const Output = @import("Output.zig");
 
 const Allocator = std.mem.Allocator;
 const Status = uefi.Status;
+
 const Menu = menus.Menu;
+const GuidNameMap = gpt.GuidNameMap;
 
 const FileInfo = protocols.FileInfo;
 const FileProtocol = protocols.FileProtocol;
@@ -24,6 +27,9 @@ const DevicePathProtocol = protocols.DevicePathProtocol;
 const FileSystemInfo = fs_info.FileSystemInfo;
 
 const utf16_str = std.unicode.utf8ToUtf16LeStringLiteral;
+
+pub const LoaderMenu = Menu(MenuError);
+const MenuEntry = LoaderMenu.MenuEntry;
 
 pub export var boot_services: *uefi.tables.BootServices = undefined;
 
@@ -122,7 +128,7 @@ pub const Loader = struct {
 
 pub const DiskInfo = struct {
     disk: *DevicePathProtocol,
-    disk_name: [:0]const u16,
+    label: [:0]const u16,
 };
 
 pub fn join_paths(alloc: Allocator, prefix: [:0]const u16, suffix: [:0]const u16) ![:0]const u16 {
@@ -283,28 +289,15 @@ pub fn caught_main() !void {
 
     var loaders = std.ArrayList(Loader).init(alloc);
 
-    // var map_maybe = linux.find_roots(alloc) catch |e| blk: {
-    //     try out.printf("caught in root: {s}\r\n", .{@errorName(e)});
-    //     _ = boot_services.stall(1000 * 1000);
-    //     break :blk null;
-    // };
-
-    // if (map_maybe) |map| {
-    //     var it = map.iterator();
-
-    //     while (it.next()) |entry| {
-    //         try out.printf("{}: ", .{entry.key_ptr.*});
-    //         try out.print16ln(entry.value_ptr.*.ptr);
-
-    //         _ = boot_services.stall(1000 * 1000);
-    //     }
-    // }
-
-    // const LoaderMenu = Menu(Loader, MenuError);
-    const LoaderMenu = Menu(MenuError);
-    const MenuEntry = LoaderMenu.MenuEntry;
-
     var entries = std.ArrayList(MenuEntry).init(alloc);
+
+    var roots = try gpt.find_roots(alloc);
+
+    var miter = roots.iterator();
+    while (miter.next()) |kvp| {
+        try out.printf("{}: ", .{kvp.key_ptr.*});
+        try out.print16ln(kvp.value_ptr.*);
+    }
 
     var buf: [1024]u8 align(8) = undefined;
 
@@ -321,12 +314,55 @@ pub fn caught_main() !void {
         try fp.getInfo(&FileSystemInfo.guid, &size, &buf).err();
 
         var info = @ptrCast(*FileSystemInfo, &buf);
-        // Have to dupe the label as its from the buffer, which we'll overwrite.
-        var label = try alloc.dupeZ(u16, std.mem.span(info.getVolumeLabel()));
+
+        var guid = blk: {
+            var iter: ?*DevicePathProtocol = device;
+
+            while (iter) |dpp| : (iter = dpp.next()) {
+                var path = dpp.getDevicePath() orelse continue;
+
+                var mdp = switch (path) {
+                    .Media => |m| m,
+                    else => continue,
+                };
+
+                var disk = switch (mdp) {
+                    .HardDrive => |hd| hd,
+                    else => continue,
+                };
+
+                try out.printf("sig type: {s}\r\n", .{@tagName(disk.signature_type)});
+
+                break :blk @bitCast(uefi.Guid, disk.partition_signature);
+            }
+
+            unreachable;
+        };
+
+        var label = blk: {
+            var vol = std.mem.span(info.getVolumeLabel());
+
+            if (vol.len == 0) {
+                vol = utf16_str("unknown disk");
+            }
+
+            if (roots.get(guid)) |fs_label| {
+                var label = try std.mem.concat(alloc, u16, &[_][]const u16{
+                    vol,
+                    utf16_str(" - "),
+                    fs_label,
+                    &[_]u16{0},
+                });
+
+                break :blk label[0 .. label.len - 1 :0];
+            } else {
+                break :blk try alloc.dupeZ(u16, vol);
+            }
+        };
 
         var disk_info = DiskInfo{
             .disk = device,
-            .disk_name = label,
+            .label = label,
         };
 
         // Scanning the root directory
@@ -342,7 +378,7 @@ pub fn caught_main() !void {
             });
         }
 
-        try linux.find_kernels(alloc, &loaders, &entries, fp, disk_info, &buf);
+        try linux.find_kernels(alloc, roots, &loaders, &entries, fp, disk_info, &buf);
 
         try scan_efi(alloc, &loaders, fp, disk_info, &buf);
 
@@ -358,13 +394,13 @@ pub fn caught_main() !void {
                 .file_name = exception,
             });
         }
-    }
 
-    try out.println("creating entires");
+        try out.println("");
+    }
 
     for (loaders.items) |*entry| {
         var desc = try std.mem.concat(alloc, u16, &[_][]const u16{
-            entry.disk_info.disk_name,
+            entry.disk_info.label,
             utf16_str(": "),
             entry.file_name,
             &[_]u16{0},
@@ -389,34 +425,11 @@ pub fn caught_main() !void {
         .callback = .{ .Empty = die_fast },
     });
 
-    // try out.reset(false);
+    try out.reset(false);
 
     var menu = LoaderMenu.init(entries.items, out, con_in);
 
-    while (true) {
-        var entry = try menu.next();
-
-        var err = switch (entry.callback) {
-            .WithData => |info| blk: {
-                break :blk info.fun(info.data);
-            },
-            .Empty => |fun| blk: {
-                break :blk fun();
-            },
-        };
-
-        err catch |e| {
-            try out.reset(false);
-
-            try out.printf("error in menu callback: {s}\r\n", .{@errorName(e)});
-            _ = boot_services.stall(1000 * 1000);
-
-            try out.reset(false);
-            continue;
-        };
-
-        unreachable;
-    }
+    try menu.run();
 }
 
 const f_panic = @import("panic.zig");
