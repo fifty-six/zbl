@@ -109,10 +109,12 @@ pub const Loader = struct {
         var img_proto = try boot_services.openProtocolSt(LoadedImageProtocol, img.?);
 
         if (self.args) |options| {
-            out.print("options: ") catch {};
+            out.print("loading ") catch {};
+            out.print16(self.file_name) catch {};
+            out.print(", options: ") catch {};
             out.print16ln(options) catch {};
 
-            _ = boot_services.stall(2 * 1000);
+            _ = boot_services.stall(2 * 1000 * 1000);
 
             img_proto.load_options = options.ptr;
             img_proto.load_options_size = @intCast(u32, (options.len + 1) * @sizeOf(u16));
@@ -294,8 +296,7 @@ pub fn caught_main() !void {
 
     var miter = roots.iterator();
     while (miter.next()) |kvp| {
-        try out.printf("{}: ", .{kvp.key_ptr.*});
-        try out.print16ln(kvp.value_ptr.*);
+        try out.printf("{}: {}\r\n", .{ kvp.key_ptr.*, std.unicode.fmtUtf16le(kvp.value_ptr.*) });
     }
 
     var buf: [1024]u8 align(8) = undefined;

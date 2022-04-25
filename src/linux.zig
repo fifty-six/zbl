@@ -51,7 +51,7 @@ const KernelLoader = struct {
 
         // maybe pool?
         var args = try std.mem.concat(self.alloc, u16, &[_][]const u16{
-            utf16_str("ro root="),
+            utf16_str("ro root=PARTUUID="),
             self.root,
             utf16_str(" initrd="),
             self.initrd,
@@ -213,10 +213,26 @@ fn _find_kernels(
             // Go to the end because we have a sentinel-terminated ptr already
             var name = fname[pat.len.. :0];
 
-            var init = find_initrd(alloc, fp, name) catch {
-                continue;
+            var init = blk: {
+                var init = find_initrd(alloc, fp, name) catch {
+                    continue;
+                };
+
+                if (root) |r| {
+                    var res = try std.mem.concat(alloc, u16, &[_][]const u16{
+                        r,
+                        utf16_str("\\"),
+                        init,
+                        &[_]u16{0},
+                    });
+
+                    alloc.free(init);
+
+                    break :blk res[0 .. res.len - 1 :0];
+                }
+
+                break :blk init;
             };
-            defer alloc.free(init);
 
             var loaded_args = load_args(alloc, fp, fname, init) catch null;
 
@@ -232,6 +248,8 @@ fn _find_kernels(
                     .file_name = file_path,
                     .args = args[0 .. args.len - 1 :0],
                 });
+
+                alloc.free(init);
 
                 continue;
             }
