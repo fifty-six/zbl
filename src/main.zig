@@ -254,6 +254,117 @@ pub fn scan_efi(
     }
 }
 
+pub fn process_handle(
+    alloc: Allocator,
+    buf: []align(8) u8,
+    handle: uefi.Handle,
+    roots: *GuidNameMap,
+    loaders: *std.ArrayList(Loader),
+    entries: *std.ArrayList(MenuEntry),
+) !void {
+    var sfsp = try boot_services.openProtocolSt(SimpleFileSystemProtocol, handle);
+    var device = try boot_services.openProtocolSt(DevicePathProtocol, handle);
+
+    var fp: *const FileProtocol = undefined;
+
+    try sfsp.openVolume(&fp).err();
+
+    var size = buf.len;
+
+    try fp.getInfo(&FileSystemInfo.guid, &size, buf.ptr).err();
+
+    var info = @ptrCast(*FileSystemInfo, buf);
+
+    var guid = blk: {
+        var iter: ?*DevicePathProtocol = device;
+
+        while (iter) |dpp| : (iter = dpp.next()) {
+            var path = dpp.getDevicePath() orelse continue;
+
+            var mdp = switch (path) {
+                .Media => |m| m,
+                else => continue,
+            };
+
+            var disk = switch (mdp) {
+                .HardDrive => |hd| hd,
+                else => continue,
+            };
+
+            try out.printf("sig type: {s}\r\n, sig: {}\r\n", .{
+                @tagName(disk.signature_type),
+                @bitCast(uefi.Guid, disk.partition_signature),
+            });
+
+            break :blk @bitCast(uefi.Guid, disk.partition_signature);
+        }
+
+        unreachable;
+    };
+
+    var label = blk: {
+        var vol = std.mem.span(info.getVolumeLabel());
+
+        if (vol.len == 0) {
+            vol = utf16_str("unknown disk");
+        }
+
+        if (roots.get(guid)) |fs_label| {
+            var label = try std.mem.concat(alloc, u16, &[_][]const u16{
+                vol,
+                utf16_str(" - "),
+                fs_label,
+                &[_]u16{0},
+            });
+
+            break :blk label[0 .. label.len - 1 :0];
+        } else {
+            break :blk try alloc.dupeZ(u16, vol);
+        }
+    };
+
+    var disk_info = DiskInfo{
+        .disk = device,
+        .label = label,
+    };
+
+    // Scanning the root directory
+    while (try scan_dir(fp, buf)) |fname| {
+        var name = try alloc.dupeZ(u16, fname);
+
+        try out.print16(name.ptr);
+        try out.print("\r\n");
+
+        try loaders.append(Loader{
+            .disk_info = disk_info,
+            .file_name = name,
+        });
+    }
+
+    linux.find_kernels(alloc, roots, loaders, entries, fp, disk_info, buf) catch |e| {
+        try out.printf("unable to find linux kernels - err: {s}\r\n", .{@errorName(e)});
+    };
+
+    scan_efi(alloc, loaders, fp, disk_info, buf) catch |e| {
+        try out.printf("unable to scan efi - err: {s}\r\n", .{@errorName(e)});
+    };
+
+    for (exceptions) |exception| {
+        var efp: *const FileProtocol = undefined;
+
+        fp.open(&efp, exception, FileProtocol.efi_file_mode_read, 0).err() catch {
+            continue;
+        };
+
+        try loaders.append(Loader{
+            .disk_info = disk_info,
+            .file_name = exception,
+        });
+    }
+
+    try out.println("");
+}
+
 pub fn main() void {
     caught_main() catch unreachable;
 }
@@ -302,107 +413,9 @@ pub fn caught_main() !void {
     var buf: [1024]u8 align(8) = undefined;
 
     for (handles) |handle| {
-        var sfsp = try boot_services.openProtocolSt(SimpleFileSystemProtocol, handle);
-        var device = try boot_services.openProtocolSt(DevicePathProtocol, handle);
-
-        var fp: *const FileProtocol = undefined;
-
-        try sfsp.openVolume(&fp).err();
-
-        var size = buf.len;
-
-        try fp.getInfo(&FileSystemInfo.guid, &size, &buf).err();
-
-        var info = @ptrCast(*FileSystemInfo, &buf);
-
-        var guid = blk: {
-            var iter: ?*DevicePathProtocol = device;
-
-            while (iter) |dpp| : (iter = dpp.next()) {
-                var path = dpp.getDevicePath() orelse continue;
-
-                var mdp = switch (path) {
-                    .Media => |m| m,
-                    else => continue,
-                };
-
-                var disk = switch (mdp) {
-                    .HardDrive => |hd| hd,
-                    else => continue,
-                };
-
-                try out.printf("sig type: {s}\r\n, sig: {}\r\n", .{
-                    @tagName(disk.signature_type),
-                    @bitCast(uefi.Guid, disk.partition_signature),
-                });
-
-                break :blk @bitCast(uefi.Guid, disk.partition_signature);
-            }
-
-            unreachable;
+        process_handle(alloc, &buf, handle, &roots, &loaders, &entries) catch |e| {
+            try out.printf("Unable to process handle: {s}\r\n", .{@errorName(e)});
         };
-
-        var label = blk: {
-            var vol = std.mem.span(info.getVolumeLabel());
-
-            if (vol.len == 0) {
-                vol = utf16_str("unknown disk");
-            }
-
-            if (roots.get(guid)) |fs_label| {
-                var label = try std.mem.concat(alloc, u16, &[_][]const u16{
-                    vol,
-                    utf16_str(" - "),
-                    fs_label,
-                    &[_]u16{0},
-                });
-
-                break :blk label[0 .. label.len - 1 :0];
-            } else {
-                break :blk try alloc.dupeZ(u16, vol);
-            }
-        };
-
-        var disk_info = DiskInfo{
-            .disk = device,
-            .label = label,
-        };
-
-        // Scanning the root directory
-        while (try scan_dir(fp, &buf)) |fname| {
-            var name = try alloc.dupeZ(u16, fname);
-
-            try out.print16(name.ptr);
-            try out.print("\r\n");
-
-            try loaders.append(Loader{
-                .disk_info = disk_info,
-                .file_name = name,
-            });
-        }
-
-        linux.find_kernels(alloc, roots, &loaders, &entries, fp, disk_info, &buf) catch |e| {
-            try out.printf("unable to find linux kernels - err: {s}\r\n", .{@errorName(e)});
-        };
-
-        scan_efi(alloc, &loaders, fp, disk_info, &buf) catch |e| {
-            try out.printf("unable to scan efi - err: {s}\r\n", .{@errorName(e)});
-        };
-
-        for (exceptions) |exception| {
-            var efp: *const FileProtocol = undefined;
-
-            fp.open(&efp, exception, FileProtocol.efi_file_mode_read, 0).err() catch {
-                continue;
-            };
-
-            try loaders.append(Loader{
-                .disk_info = disk_info,
-                .file_name = exception,
-            });
-        }
-
-        try out.println("");
     }
 
     for (loaders.items) |*entry| {

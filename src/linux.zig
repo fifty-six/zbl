@@ -151,7 +151,7 @@ pub fn load_args(
 
 pub fn find_kernels(
     alloc: Allocator,
-    roots: GuidNameMap,
+    roots: *GuidNameMap,
     li: *std.ArrayList(Loader),
     entries: *std.ArrayList(LoaderMenu.MenuEntry),
     fp: *const FileProtocol,
@@ -172,7 +172,7 @@ pub fn find_kernels(
 
 fn _find_kernels(
     alloc: Allocator,
-    roots: GuidNameMap,
+    roots: *GuidNameMap,
     li: *std.ArrayList(Loader),
     entries: *std.ArrayList(LoaderMenu.MenuEntry),
     fp: *const FileProtocol,
