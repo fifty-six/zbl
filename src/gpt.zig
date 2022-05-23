@@ -201,6 +201,10 @@ pub fn parse_gpt_header(alloc: Allocator, entries: *GuidNameMap, buf: []u8, bloc
 
     var parts = @ptrCast(*EfiPartitionEntry, buf.ptr + gpt.partition_entry_lba * block_size);
 
+    const kb = 1024;
+    const mb = 1024 * kb;
+    const gb = 1024 * mb;
+
     var cnt = gpt.entry_count;
     while (cnt != 0) : (cnt -= 1) {
         var part = parts.*;
@@ -215,7 +219,32 @@ pub fn parse_gpt_header(alloc: Allocator, entries: *GuidNameMap, buf: []u8, bloc
             if (slice.len > 0 and slice.len < part.partition_name.len) {
                 break :blk try alloc.dupeZ(u16, slice);
             } else {
-                break :blk try alloc.dupeZ(u16, utf16_str("unknown"));
+                var fmt: [100]u8 = undefined;
+
+                var diff: u64 = undefined;
+                var bytes: u64 = undefined;
+
+                if (@subWithOverflow(u64, part.ending_lba, part.starting_lba, &diff))
+                    break :blk try alloc.dupeZ(u16, utf16_str("unknown - ending_lba < starting_lba"));
+
+                if (@mulWithOverflow(u64, diff, block_size, &bytes))
+                    break :blk try alloc.dupeZ(u16, utf16_str("unknown - unknown size (mul overflow)"));
+
+                const Size = struct {
+                    size: u64,
+                    str: []const u8,
+                };
+
+                var size: Size = switch (bytes) {
+                    0...(kb - 1) => .{ .size = bytes, .str = " bytes" },
+                    kb...(mb - 1) => .{ .size = @divFloor(bytes, kb), .str = "KiB" },
+                    mb...gb => .{ .size = @divFloor(bytes, mb), .str = "MiB" },
+                    else => .{ .size = @divFloor(bytes, gb), .str = "GiB" },
+                };
+
+                var res = try std.fmt.bufPrint(&fmt, "unknown {}{s} volume", size);
+
+                break :blk try std.unicode.utf8ToUtf16LeWithNull(alloc, res);
             }
         };
 
@@ -242,10 +271,10 @@ pub fn find_roots(alloc: Allocator) !GuidNameMap {
 
     var entries = GuidNameMap.init(alloc);
 
-    try out.printf("got {} handles\r\n", .{handles.len});
-
     for (handles) |handle| {
-        var blk_io = boot_services.openProtocolSt(BlockIoProtocol, handle) catch unreachable;
+        var blk_io = boot_services.openProtocolSt(BlockIoProtocol, handle) catch {
+            continue;
+        };
 
         var blk_media = blk_io.media;
 

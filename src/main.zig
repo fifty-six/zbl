@@ -331,7 +331,10 @@ pub fn caught_main() !void {
                     else => continue,
                 };
 
-                try out.printf("sig type: {s}\r\n", .{@tagName(disk.signature_type)});
+                try out.printf("sig type: {s}\r\n, sig: {}\r\n", .{
+                    @tagName(disk.signature_type),
+                    @bitCast(uefi.Guid, disk.partition_signature),
+                });
 
                 break :blk @bitCast(uefi.Guid, disk.partition_signature);
             }
@@ -378,9 +381,13 @@ pub fn caught_main() !void {
             });
         }
 
-        try linux.find_kernels(alloc, roots, &loaders, &entries, fp, disk_info, &buf);
+        linux.find_kernels(alloc, roots, &loaders, &entries, fp, disk_info, &buf) catch |e| {
+            try out.printf("unable to find linux kernels - err: {s}\r\n", .{@errorName(e)});
+        };
 
-        try scan_efi(alloc, &loaders, fp, disk_info, &buf);
+        scan_efi(alloc, &loaders, fp, disk_info, &buf) catch |e| {
+            try out.printf("unable to scan efi - err: {s}\r\n", .{@errorName(e)});
+        };
 
         for (exceptions) |exception| {
             var efp: *const FileProtocol = undefined;
