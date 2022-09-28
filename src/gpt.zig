@@ -5,6 +5,7 @@ const main = @import("main.zig");
 const Output = @import("Output.zig");
 
 const uefi = std.os.uefi;
+const BlockIoProtocol = std.os.uefi.protocols.BlockIoProtocol;
 
 const Allocator = std.mem.Allocator;
 const Status = uefi.Status;
@@ -22,7 +23,7 @@ const Lba = u64;
 
 pub const GuidNameMap = std.AutoHashMap(uefi.Guid, [:0]const u16);
 
-const MbrPartitionRecord = packed struct {
+const MbrPartitionRecord = extern struct {
     boot_indicator: u8,
 
     start_head: u8,
@@ -39,7 +40,7 @@ const MbrPartitionRecord = packed struct {
     size_in_lba: [4]u8,
 };
 
-const MasterBootRecord = packed struct {
+const MasterBootRecord = extern struct {
     boot_code: [440]u8,
     unique_signature: [4]u8,
     unknown: [2]u8,
@@ -143,44 +144,6 @@ const EfiBlockMedia = extern struct {
     optimal_transfer_length_granularity: u32,
 };
 
-const BlockIoProtocol = extern struct {
-    const Self = @This();
-
-    revision: u64,
-    media: *EfiBlockMedia,
-
-    _reset: fn (*BlockIoProtocol, extended_verification: bool) callconv(.C) Status,
-    _read_blocks: fn (*BlockIoProtocol, media_id: u32, lba: Lba, buffer_size: usize, buf: [*]u8) callconv(.C) Status,
-    _write_blocks: fn (*BlockIoProtocol, media_id: u32, lba: Lba, buffer_size: usize, buf: [*]u8) callconv(.C) Status,
-    _flush_blocks: fn (*BlockIoProtocol) callconv(.C) Status,
-
-    pub fn reset(self: *Self, extended_verification: bool) Status {
-        return self._reset(self, extended_verification);
-    }
-
-    pub fn read_blocks(self: *Self, media_id: u32, lba: Lba, buffer_size: usize, buf: [*]u8) Status {
-        return self._read_blocks(self, media_id, lba, buffer_size, buf);
-    }
-
-    pub fn write_blocks(self: *Self, media_id: u32, lba: Lba, buffer_size: usize, buf: [*]u8) Status {
-        return self._write_blocks(self, media_id, lba, buffer_size, buf);
-    }
-
-    pub fn flush_blocks(self: *Self) Status {
-        return self._flush_blocks(self);
-    }
-
-    // { 03 79 BE 4E - D7 06 - 43 7d - B0 37 -ED B8 2F B7 72 A4}
-    pub const guid align(8) = uefi.Guid{
-        .time_low = 0x964e5b21,
-        .time_mid = 0x6459,
-        .time_high_and_version = 0x11d2,
-        .clock_seq_high_and_reserved = 0x8e,
-        .clock_seq_low = 0x39,
-        .node = [_]u8{ 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b },
-    };
-};
-
 pub fn parse_gpt_header(alloc: Allocator, entries: *GuidNameMap, buf: []u8, block_size: u32) !void {
     const mbr_magic = 0xaa55;
     const gpt_indicator = 0xee;
@@ -280,7 +243,7 @@ pub fn find_roots(alloc: Allocator) !GuidNameMap {
 
         var buf: [2048]u8 = undefined;
 
-        blk_io.read_blocks(blk_media.media_id, 0, buf.len, &buf).err() catch {
+        blk_io.readBlocks(blk_media.media_id, 0, buf.len, &buf).err() catch {
             continue;
         };
 

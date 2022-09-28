@@ -7,8 +7,8 @@ const Status = uefi.Status;
 const Output = @import("Output.zig");
 
 pub const CallbackFun = union(enum) {
-    Empty: fn () void,
-    WithData: fn (?*align(8) const anyopaque) void,
+    Empty: *const fn () void,
+    WithData: *const fn (?*align(8) const anyopaque) void,
 };
 
 const Vec = struct { x: usize, y: usize };
@@ -19,12 +19,12 @@ pub fn Menu(comptime err: type) type {
 
         pub const MenuEntry = struct {
             const DataCallback = struct {
-                fun: fn (*anyopaque) err!void,
+                fun: *const fn (*anyopaque) err!void,
                 data: *anyopaque,
             };
 
             const Callback = union(enum) {
-                Empty: fn () err!void,
+                Empty: *const fn () err!void,
                 WithData: DataCallback,
             };
 

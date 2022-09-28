@@ -35,6 +35,13 @@ const Lba = u64;
 
 const kernel_patterns = [_][:0]const u16{
     utf16_str("vmlinuz-"),
+    utf16_str("vmlinuz"),
+};
+
+const initrd_patterns = [_][:0]const u16{
+    utf16_str("initrd-"),
+    utf16_str("init-"),
+    utf16_str("init"),
 };
 
 const KernelLoader = struct {
@@ -110,27 +117,36 @@ pub fn find_initrd(
     fp: *const FileProtocol,
     name: []const u16,
 ) ![]const u16 {
-    var initrd_name = try std.mem.concat(
-        alloc,
-        u16,
-        &[_][]const u16{
-            utf16_str("initramfs-"),
-            name,
-            utf16_str(".img"),
-            &[_]u16{0},
-        },
-    );
-    errdefer alloc.free(initrd_name);
+    // var buf: [128]u8 = undefined;
 
-    var initrd = initrd_name[0 .. initrd_name.len - 1 :0];
+    for (initrd_patterns) |pat| {
+        var initrd_name = try std.mem.concat(
+            alloc,
+            u16,
+            &[_][]const u16{
+                pat,
+                name,
+                utf16_str(".img"),
+                &[_]u16{0},
+            },
+        );
+        errdefer alloc.free(initrd_name);
 
-    var efp: *const FileProtocol = undefined;
+        var initrd = initrd_name[0 .. initrd_name.len - 1 :0];
 
-    // Check that initrd-(...) exists
-    try fp.open(&efp, initrd, FileProtocol.efi_file_mode_read, 0).err();
+        var efp: *const FileProtocol = undefined;
 
-    // Return it without the null terminator for concat purposes
-    return initrd_name[0 .. initrd_name.len - 1];
+        // Check that initrd-(...) exists
+        fp.open(&efp, initrd, FileProtocol.efi_file_mode_read, 0).err() catch {
+            alloc.free(initrd_name);
+            continue;
+        };
+
+        // Return it without the null terminator for concat purposes
+        return initrd_name[0 .. initrd_name.len - 1];
+    }
+
+    return error.NotFound;
 }
 pub fn load_args(
     alloc: Allocator,
