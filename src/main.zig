@@ -453,8 +453,8 @@ pub fn caught_main() !void {
 }
 
 const f_panic = @import("panic.zig");
-pub fn panic(message: []const u8, trace: ?*std.builtin.StackTrace) noreturn {
-    f_panic.panic(message, trace);
+pub fn panic(message: []const u8, trace: ?*std.builtin.StackTrace, ret_addr: ?usize) noreturn {
+    f_panic.panic(message, trace, ret_addr);
 }
 
 pub fn die_fast() noreturn {

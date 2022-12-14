@@ -48,36 +48,36 @@ const MasterBootRecord = extern struct {
     signature: u16,
 };
 
-const GptHeader = packed struct {
-    signature: u64,
+const GptHeader = extern struct {
+    signature: u64 align(1),
 
-    revision: u32,
-    header_size: u32,
-    header_crc32: u32,
-    reserved: u32,
+    revision: u32 align(1),
+    header_size: u32 align(1),
+    header_crc32: u32 align(1),
+    reserved: u32 align(1),
 
-    my_lba: Lba,
-    alternate_lba: Lba,
-    first_usable_lba: Lba,
-    last_usable_lba: Lba,
+    my_lba: Lba align(1),
+    alternate_lba: Lba align(1),
+    first_usable_lba: Lba align(1),
+    last_usable_lba: Lba align(1),
 
-    disk_guid: uefi.Guid,
+    disk_guid: uefi.Guid align(1),
 
-    partition_entry_lba: Lba,
-    entry_count: u32,
-    entry_size: u32,
-    parts_crc32: u32,
+    partition_entry_lba: Lba align(1),
+    entry_count: u32 align(1),
+    entry_size: u32 align(1),
+    parts_crc32: u32 align(1),
 };
 
-const EfiPartitionEntry = packed struct {
-    partition_type: uefi.Guid,
-    partition_uuid: uefi.Guid,
+const EfiPartitionEntry = extern struct {
+    partition_type: uefi.Guid align(1),
+    partition_uuid: uefi.Guid align(1),
 
-    starting_lba: Lba,
-    ending_lba: Lba,
+    starting_lba: Lba align(1),
+    ending_lba: Lba align(1),
 
-    attributes: u64,
-    partition_name: [36]u16,
+    attributes: u64 align(1),
+    partition_name: [36]u16 align(1),
 };
 
 const PartitionInfoProtocol = packed struct {
@@ -150,7 +150,7 @@ pub fn parse_gpt_header(alloc: Allocator, entries: *GuidNameMap, buf: []u8, bloc
     const gpt_magic = 0x5452415020494645;
     const unused_entry_guid = std.mem.zeroes(uefi.Guid);
 
-    var mbr = @ptrCast(*MasterBootRecord, buf.ptr);
+    var mbr = @ptrCast(*MasterBootRecord, @alignCast(2, buf.ptr));
 
     if (mbr.signature != mbr_magic or mbr.partitions[0].os_indicator != gpt_indicator) {
         return;

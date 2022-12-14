@@ -31,7 +31,7 @@ pub fn print_to(out: Output, msg: []const u8, reset: Reset) void {
     out.println("Press any key to stop.") catch {};
 }
 
-pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace) noreturn {
+pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, _: ?usize) noreturn {
     @setCold(true);
 
     // Don't have DWARF info.
