@@ -317,7 +317,7 @@ fn _find_kernels(
 
             var menu = try alloc.create(KernelMenu);
             menu.* = KernelMenu.init(
-                disk_entries.toOwnedSlice(),
+                try disk_entries.toOwnedSlice(),
                 Output{ .con = uefi.system_table.con_out.? },
                 uefi.system_table.con_in.?,
             );

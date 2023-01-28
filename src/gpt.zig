@@ -184,14 +184,13 @@ pub fn parse_gpt_header(alloc: Allocator, entries: *GuidNameMap, buf: []u8, bloc
             } else {
                 var fmt: [100]u8 = undefined;
 
-                var diff: u64 = undefined;
-                var bytes: u64 = undefined;
-
-                if (@subWithOverflow(u64, part.ending_lba, part.starting_lba, &diff))
+                var diff: u64 = std.math.sub(u64, part.ending_lba, part.starting_lba) catch {
                     break :blk try alloc.dupeZ(u16, utf16_str("unknown - ending_lba < starting_lba"));
+                };
 
-                if (@mulWithOverflow(u64, diff, block_size, &bytes))
+                var bytes: u64 = std.math.mul(u64, diff, block_size) catch {
                     break :blk try alloc.dupeZ(u16, utf16_str("unknown - unknown size (mul overflow)"));
+                };
 
                 const Size = struct {
                     size: u64,
