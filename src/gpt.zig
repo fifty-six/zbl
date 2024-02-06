@@ -5,7 +5,7 @@ const main = @import("main.zig");
 const Output = @import("Output.zig");
 
 const uefi = std.os.uefi;
-const BlockIoProtocol = std.os.uefi.protocols.BlockIoProtocol;
+const BlockIoProtocol = std.os.uefi.protocol.BlockIo;
 
 const Allocator = std.mem.Allocator;
 const Status = uefi.Status;
@@ -109,8 +109,8 @@ const PartitionInfoProtocol = packed struct {
         }
 
         return switch (self.type) {
-            .Mbr => Info{ .Mbr = @ptrCast(*MbrPartitionRecord, @ptrCast([*]u8, &self) + @offsetOf(Self, "info")) },
-            .Gpt => Info{ .Gpt = @ptrCast(*EfiPartitionEntry, @ptrCast([*]u8, &self) + @offsetOf(Self, "info")) },
+            .Mbr => Info{ .Mbr = @as(*MbrPartitionRecord, @ptrCast(@as([*]u8, @ptrCast(&self)) + @offsetOf(Self, "info"))) },
+            .Gpt => Info{ .Gpt = @as(*EfiPartitionEntry, @ptrCast(@as([*]u8, @ptrCast(&self)) + @offsetOf(Self, "info"))) },
             else => unreachable,
         };
     }
@@ -150,19 +150,19 @@ pub fn parse_gpt_header(alloc: Allocator, entries: *GuidNameMap, buf: []u8, bloc
     const gpt_magic = 0x5452415020494645;
     const unused_entry_guid = std.mem.zeroes(uefi.Guid);
 
-    var mbr = @ptrCast(*MasterBootRecord, @alignCast(2, buf.ptr));
+    const mbr = @as(*align(2) MasterBootRecord, @ptrCast(@alignCast(buf.ptr)));
 
     if (mbr.signature != mbr_magic or mbr.partitions[0].os_indicator != gpt_indicator) {
         return;
     }
 
-    var gpt = @ptrCast(*GptHeader, buf.ptr + @sizeOf(MasterBootRecord));
+    const gpt = @as(*GptHeader, @ptrCast(buf.ptr + @sizeOf(MasterBootRecord)));
 
     if (gpt.signature != gpt_magic) {
         return;
     }
 
-    var parts = @ptrCast(*EfiPartitionEntry, buf.ptr + gpt.partition_entry_lba * block_size);
+    var parts = @as(*EfiPartitionEntry, @ptrCast(buf.ptr + gpt.partition_entry_lba * block_size));
 
     const kb = 1024;
     const mb = 1024 * kb;
@@ -171,24 +171,24 @@ pub fn parse_gpt_header(alloc: Allocator, entries: *GuidNameMap, buf: []u8, bloc
     var cnt = gpt.entry_count;
     while (cnt != 0) : (cnt -= 1) {
         var part = parts.*;
-        defer parts = @ptrCast(*EfiPartitionEntry, @ptrCast([*]u8, parts) + gpt.entry_size);
+        defer parts = @as(*EfiPartitionEntry, @ptrCast(@as([*]u8, @ptrCast(parts)) + gpt.entry_size));
 
         if (part.partition_type.eql(unused_entry_guid))
             break;
 
-        var slice = std.mem.sliceTo(@alignCast(2, &parts.partition_name), 0);
+        const slice = std.mem.sliceTo(@as(*align(2) [36]u16, @alignCast(&parts.partition_name)), 0);
 
-        var name: [:0]const u16 = blk: {
+        const name: [:0]const u16 = blk: {
             if (slice.len > 0 and slice.len < part.partition_name.len) {
                 break :blk try alloc.dupeZ(u16, slice);
             } else {
                 var fmt: [100]u8 = undefined;
 
-                var diff: u64 = std.math.sub(u64, part.ending_lba, part.starting_lba) catch {
+                const diff: u64 = std.math.sub(u64, part.ending_lba, part.starting_lba) catch {
                     break :blk try alloc.dupeZ(u16, utf16_str("unknown - ending_lba < starting_lba"));
                 };
 
-                var bytes: u64 = std.math.mul(u64, diff, block_size) catch {
+                const bytes: u64 = std.math.mul(u64, diff, block_size) catch {
                     break :blk try alloc.dupeZ(u16, utf16_str("unknown - unknown size (mul overflow)"));
                 };
 
@@ -197,14 +197,14 @@ pub fn parse_gpt_header(alloc: Allocator, entries: *GuidNameMap, buf: []u8, bloc
                     str: []const u8,
                 };
 
-                var size: Size = switch (bytes) {
+                const size: Size = switch (bytes) {
                     0...(kb - 1) => .{ .size = bytes, .str = " bytes" },
                     kb...(mb - 1) => .{ .size = @divFloor(bytes, kb), .str = "KiB" },
                     mb...gb => .{ .size = @divFloor(bytes, mb), .str = "MiB" },
                     else => .{ .size = @divFloor(bytes, gb), .str = "GiB" },
                 };
 
-                var res = try std.fmt.bufPrint(&fmt, "unknown {}{s} volume", size);
+                const res = try std.fmt.bufPrint(&fmt, "unknown {}{s} volume", size);
 
                 break :blk try std.unicode.utf8ToUtf16LeWithNull(alloc, res);
             }
@@ -215,7 +215,7 @@ pub fn parse_gpt_header(alloc: Allocator, entries: *GuidNameMap, buf: []u8, bloc
 }
 
 pub fn find_roots(alloc: Allocator) !GuidNameMap {
-    var handles = blk: {
+    const handles = blk: {
         var handle_ptr: [*]uefi.Handle = undefined;
         var res_size: usize = undefined;
 
@@ -238,7 +238,7 @@ pub fn find_roots(alloc: Allocator) !GuidNameMap {
             continue;
         };
 
-        var blk_media = blk_io.media;
+        const blk_media = blk_io.media;
 
         var buf: [2048]u8 = undefined;
 

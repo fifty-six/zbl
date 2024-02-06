@@ -13,7 +13,7 @@ pub const FileSystemInfo = extern struct {
     _volume_label: u16,
 
     pub fn getVolumeLabel(self: *const Self) [*:0]const u16 {
-        return @ptrCast([*:0]const u16, &self._volume_label);
+        return @as([*:0]const u16, @ptrCast(&self._volume_label));
     }
 
     pub const guid align(8) = Guid{

@@ -1,6 +1,6 @@
 const std = @import("std");
 const uefi = std.os.uefi;
-const protocols = uefi.protocols;
+const protocols = uefi.protocol;
 const panic_handler = @import("panic.zig");
 
 const Status = uefi.Status;
@@ -39,8 +39,8 @@ pub fn Menu(comptime err: type) type {
         _res: Vec,
         _highlighted: usize,
 
-        const ConOut = protocols.SimpleTextOutputProtocol;
-        const In = protocols.SimpleTextInputProtocol;
+        const ConOut = protocols.SimpleTextOutput;
+        const In = protocols.SimpleTextInput;
 
         pub fn init(entries: []const MenuEntry, out: Output, in: *In) Self {
             var self = Self{
@@ -58,9 +58,9 @@ pub fn Menu(comptime err: type) type {
 
         pub fn run(self: *Self) !void {
             while (true) {
-                var entry = try self.next();
+                const entry = try self.next();
 
-                var callback_error = switch (entry.callback) {
+                const callback_error = switch (entry.callback) {
                     .WithData => |info| blk: {
                         break :blk info.fun(info.data);
                     },
@@ -96,7 +96,7 @@ pub fn Menu(comptime err: type) type {
                     @panic("received invalid index");
                 }
 
-                var key: protocols.InputKey = undefined;
+                var key: In.Key.Input = undefined;
                 if (self.in.readKeyStroke(&key) != .Success)
                     return error.FailedToReadKey;
 
@@ -106,12 +106,12 @@ pub fn Menu(comptime err: type) type {
                         // 1 (Up) -> -1, 2 (Down) -> 1
                         // -2 [1, 2] + 3 -> [-2, -4] + 3 -> [1, -1]
                         // 2 [1, 2] -> [2, 4] -> [-1, 1]
-                        var shift = 2 * @intCast(i8, key.scan_code) - 3;
+                        const shift = 2 * @as(i8, @intCast(key.scan_code)) - 3;
 
                         self._highlighted = if (self._highlighted == 0 and shift < 0)
-                            self.entries.len - @intCast(u8, -shift)
+                            self.entries.len - @as(u8, @intCast(-shift))
                         else
-                            @intCast(usize, (@intCast(isize, self._highlighted) + shift)) % self.entries.len;
+                            @as(usize, @intCast((@as(isize, @intCast(self._highlighted)) + shift))) % self.entries.len;
                     },
 
                     // Escape
@@ -143,8 +143,8 @@ pub fn Menu(comptime err: type) type {
 
             center.y -= @divFloor(self.entries.len, 2);
 
-            for (self.entries) |entry, i| {
-                var start = center.x - @divFloor(entry.description.len, 2);
+            for (self.entries, 0..) |entry, i| {
+                const start = center.x - @divFloor(entry.description.len, 2);
 
                 try self.out.setCursorPosition(start, center.y + i);
 

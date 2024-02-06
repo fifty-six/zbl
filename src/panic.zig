@@ -3,7 +3,7 @@ const builtin = @import("builtin");
 const uefi = std.os.uefi;
 const Status = uefi.Status;
 
-const SimpleTextOutputProtocol = uefi.protocols.SimpleTextOutputProtocol;
+const SimpleTextOutputProtocol = uefi.protocol.SimpleTextOutput;
 
 const Output = @import("Output.zig");
 

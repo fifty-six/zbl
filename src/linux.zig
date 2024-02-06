@@ -11,10 +11,10 @@ const uefi = std.os.uefi;
 
 const Status = uefi.Status;
 
-const protocols = uefi.protocols;
-const FileProtocol = protocols.FileProtocol;
-const DevicePathProtocol = protocols.DevicePathProtocol;
-const FileInfo = protocols.FileInfo;
+const protocols = uefi.protocol;
+const FileProtocol = protocols.File;
+const DevicePathProtocol = protocols.DevicePath;
+const FileInfo = uefi.FileInfo;
 
 const Allocator = std.mem.Allocator;
 
@@ -51,9 +51,9 @@ const KernelLoader = struct {
     alloc: Allocator,
 
     pub fn load(self_opaque: *const anyopaque) Loader.LoaderError!void {
-        var self = @ptrCast(
+        const self = @as(
             *const KernelLoader,
-            @alignCast(@alignOf(KernelLoader), self_opaque),
+            @ptrCast(@alignCast(self_opaque)),
         );
 
         // maybe pool?
@@ -89,7 +89,7 @@ pub fn read_conf(
     );
     defer alloc.free(conf_name);
 
-    var conf_sentinel = conf_name[0 .. conf_name.len - 1 :0];
+    const conf_sentinel = conf_name[0 .. conf_name.len - 1 :0];
     try out.print16ln(conf_sentinel.ptr);
 
     var efp: *FileProtocol = undefined;
@@ -132,7 +132,7 @@ pub fn find_initrd(
         );
         errdefer alloc.free(initrd_name);
 
-        var initrd = initrd_name[0 .. initrd_name.len - 1 :0];
+        const initrd = initrd_name[0 .. initrd_name.len - 1 :0];
 
         var efp: *const FileProtocol = undefined;
 
@@ -154,8 +154,8 @@ pub fn load_args(
     kernel: [:0]const u16,
     init: []const u16,
 ) ![]u16 {
-    var conf = try read_conf(alloc, fp, kernel[0..]);
-    var args = try std.mem.concat(alloc, u16, &[_][]const u16{
+    const conf = try read_conf(alloc, fp, kernel[0..]);
+    const args = try std.mem.concat(alloc, u16, &[_][]const u16{
         conf,
         utf16_str(" initrd="),
         init,
@@ -210,7 +210,7 @@ fn _find_kernels(
         if (size == 0)
             break;
 
-        var file_info = @ptrCast(*FileInfo, buf.ptr);
+        var file_info = @as(*FileInfo, @ptrCast(buf.ptr));
 
         if ((file_info.attribute & FileInfo.efi_file_directory) != 0)
             continue;
@@ -227,10 +227,10 @@ fn _find_kernels(
             }
 
             // Go to the end because we have a sentinel-terminated ptr already
-            var name = fname[pat.len.. :0];
+            const name = fname[pat.len.. :0];
 
-            var init = blk: {
-                var init = find_initrd(alloc, fp, name) catch {
+            const init = blk: {
+                const init = find_initrd(alloc, fp, name) catch {
                     continue;
                 };
 
@@ -250,9 +250,9 @@ fn _find_kernels(
                 break :blk init;
             };
 
-            var loaded_args = load_args(alloc, fp, fname, init) catch null;
+            const loaded_args = load_args(alloc, fp, fname, init) catch null;
 
-            var file_path = if (root) |r|
+            const file_path = if (root) |r|
                 try main.join_paths(alloc, r, fname)
             else
                 try alloc.dupeZ(u16, fname);
@@ -275,7 +275,7 @@ fn _find_kernels(
             const MenuEntry = KernelMenu.MenuEntry;
 
             var disk_entries = std.ArrayList(MenuEntry).init(alloc);
-            var internal_loader = Loader{
+            const internal_loader = Loader{
                 .disk_info = disk_info,
                 .file_name = file_path,
                 .args = null,
@@ -286,8 +286,8 @@ fn _find_kernels(
                 var guid16: [128:0]u16 = undefined;
                 var guid_buf: [128]u8 = undefined;
 
-                var guid8 = try std.fmt.bufPrint(&guid_buf, "{}", .{v.key_ptr.*});
-                var ind = try std.unicode.utf8ToUtf16Le(&guid16, guid8);
+                const guid8 = try std.fmt.bufPrint(&guid_buf, "{}", .{v.key_ptr.*});
+                const ind = try std.unicode.utf8ToUtf16Le(&guid16, guid8);
 
                 var desc = try std.mem.concat(alloc, u16, &[_][]const u16{
                     v.value_ptr.*,
@@ -296,9 +296,9 @@ fn _find_kernels(
                     &[_]u16{0},
                 });
 
-                var guid16_alloc = try alloc.dupeZ(u16, guid16[0..ind]);
+                const guid16_alloc = try alloc.dupeZ(u16, guid16[0..ind]);
 
-                var loader = try alloc.create(KernelLoader);
+                const loader = try alloc.create(KernelLoader);
                 loader.* = KernelLoader{
                     .loader = internal_loader,
                     .root = guid16_alloc,
@@ -315,7 +315,7 @@ fn _find_kernels(
                 });
             }
 
-            var menu = try alloc.create(KernelMenu);
+            const menu = try alloc.create(KernelMenu);
             menu.* = KernelMenu.init(
                 try disk_entries.toOwnedSlice(),
                 Output{ .con = uefi.system_table.con_out.? },
@@ -324,7 +324,7 @@ fn _find_kernels(
 
             const MenuRunner = struct {
                 pub fn run_menu(opaque_ptr: *anyopaque) main.MenuError!void {
-                    var menu_ptr = @ptrCast(*KernelMenu, @alignCast(@alignOf(KernelMenu), opaque_ptr));
+                    var menu_ptr = @as(*KernelMenu, @ptrCast(@alignCast(opaque_ptr)));
 
                     try menu_ptr.run();
                 }

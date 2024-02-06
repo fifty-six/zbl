@@ -2,7 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const uefi = std.os.uefi;
 
-const protocols = uefi.protocols;
+const protocols = uefi.protocol;
 
 const menus = @import("menu.zig");
 const device_path = @import("device_path.zig");
@@ -18,11 +18,11 @@ const Status = uefi.Status;
 const Menu = menus.Menu;
 const GuidNameMap = gpt.GuidNameMap;
 
-const FileInfo = protocols.FileInfo;
-const FileProtocol = protocols.FileProtocol;
-const LoadedImageProtocol = protocols.LoadedImageProtocol;
-const SimpleFileSystemProtocol = protocols.SimpleFileSystemProtocol;
-const DevicePathProtocol = protocols.DevicePathProtocol;
+const FileInfo = uefi.FileInfo;
+const FileProtocol = protocols.File;
+const LoadedImageProtocol = protocols.LoadedImage;
+const SimpleFileSystemProtocol = protocols.SimpleFileSystem;
+const DevicePathProtocol = protocols.DevicePath;
 const FileSystemInfo = fs_info.FileSystemInfo;
 
 const utf16_str = std.unicode.utf8ToUtf16LeStringLiteral;
@@ -35,8 +35,8 @@ pub export var boot_services: *uefi.tables.BootServices = undefined;
 pub var out: Output = undefined;
 
 var sys_table: *uefi.tables.SystemTable = undefined;
-var con_in: *protocols.SimpleTextInputProtocol = undefined;
-var con_out: *protocols.SimpleTextOutputProtocol = undefined;
+var con_in: *protocols.SimpleTextInput = undefined;
+var con_out: *protocols.SimpleTextOutput = undefined;
 
 var pool_alloc_state: std.heap.ArenaAllocator = undefined;
 var pool_alloc: Allocator = undefined;
@@ -73,7 +73,7 @@ pub fn reboot_into_firmware() !void {
     try rs.getVariable(utf16_str("OsIndications"), global_var, null, &size, &os_ind).err();
 
     if ((os_ind & boot_to_firmware) == 0) {
-        var attrs: u32 = runtime_access | bootservice_access | nonvolatile_access;
+        const attrs: u32 = runtime_access | bootservice_access | nonvolatile_access;
 
         os_ind |= boot_to_firmware;
 
@@ -95,7 +95,7 @@ pub const Loader = struct {
     } || Status.EfiError;
 
     pub fn wrapped_load(opaque_ptr: *anyopaque) LoaderError!void {
-        var self = @ptrCast(*Self, @alignCast(@alignOf(Self), opaque_ptr));
+        var self = @as(*align(@alignOf(Self)) Self, @ptrCast(@alignCast(opaque_ptr)));
 
         try self.load();
     }
@@ -103,7 +103,7 @@ pub const Loader = struct {
     pub fn load(self: *const Self) LoaderError!void {
         var img: ?uefi.Handle = undefined;
 
-        var image_path = try device_path.file_path(pool_alloc, self.disk_info.disk, self.file_name);
+        const image_path = try device_path.file_path(pool_alloc, self.disk_info.disk, self.file_name);
         try boot_services.loadImage(false, uefi.handle, image_path, null, 0, &img).err();
 
         var img_proto = try boot_services.openProtocolSt(LoadedImageProtocol, img.?);
@@ -117,7 +117,7 @@ pub const Loader = struct {
             _ = boot_services.stall(2 * 1000 * 1000);
 
             img_proto.load_options = options.ptr;
-            img_proto.load_options_size = @intCast(u32, (options.len + 1) * @sizeOf(u16));
+            img_proto.load_options_size = @intCast((options.len + 1) * @sizeOf(u16));
         } else {
             img_proto.load_options = null;
             img_proto.load_options_size = 0;
@@ -136,9 +136,9 @@ pub fn join_paths(alloc: Allocator, prefix: [:0]const u16, suffix: [:0]const u16
     var res: []u16 = try alloc.alloc(u16, prefix.len + 1 + suffix.len + 1);
     res[res.len - 1] = 0;
 
-    std.mem.copy(u16, res[0..prefix.len], prefix);
-    std.mem.copy(u16, res[prefix.len .. prefix.len + 1], utf16_str("\\"));
-    std.mem.copy(u16, res[prefix.len + 1 .. res.len], suffix);
+    @memcpy(res[0..prefix.len], prefix);
+    @memcpy(res[prefix.len .. prefix.len + 1], utf16_str("\\"));
+    @memcpy(res[prefix.len + 1 .. res.len - 1], suffix);
 
     return res[0 .. res.len - 1 :0];
 }
@@ -154,12 +154,12 @@ pub fn scan_dir(fp: *const FileProtocol, buf: []align(8) u8) !?[:0]const u16 {
         if (size == 0)
             break;
 
-        var file_info = @ptrCast(*FileInfo, buf.ptr);
+        var file_info = @as(*FileInfo, @ptrCast(buf.ptr));
 
         if ((file_info.attribute & FileInfo.efi_file_directory) != 0)
             continue;
 
-        var fname = std.mem.span(file_info.getFileName());
+        const fname = std.mem.span(file_info.getFileName());
 
         if (!std.mem.endsWith(u16, fname, utf16_str(".efi")) and !std.mem.endsWith(u16, fname, utf16_str(".EFI")))
             continue;
@@ -195,9 +195,9 @@ pub fn next_dir(fp: *const FileProtocol, buf: []align(8) u8) !?Directory {
         if (size == 0)
             break;
 
-        var file_info = @ptrCast(*FileInfo, buf.ptr);
+        var file_info = @as(*FileInfo, @ptrCast(buf.ptr));
 
-        var fname = std.mem.span(file_info.getFileName());
+        const fname = std.mem.span(file_info.getFileName());
 
         if (std.mem.eql(u16, fname, utf16_str("..")) or std.mem.eql(u16, fname, utf16_str(".")))
             continue;
@@ -237,11 +237,11 @@ pub fn scan_efi(
         defer dir.deinit();
 
         // Copy out the path with the prefix, as it's in the buffer which will be cleared.
-        var base_path = try join_paths(alloc, efi_str, dir.dir_name);
+        const base_path = try join_paths(alloc, efi_str, dir.dir_name);
         defer alloc.free(base_path);
 
         while (try scan_dir(dir.handle, buf)) |fname| {
-            var name = try join_paths(alloc, base_path, fname);
+            const name = try join_paths(alloc, base_path, fname);
 
             try out.print16(name.ptr);
             try out.print("\r\n");
@@ -263,7 +263,7 @@ pub fn process_handle(
     entries: *std.ArrayList(MenuEntry),
 ) !void {
     var sfsp = try boot_services.openProtocolSt(SimpleFileSystemProtocol, handle);
-    var device = try boot_services.openProtocolSt(DevicePathProtocol, handle);
+    const device = try boot_services.openProtocolSt(DevicePathProtocol, handle);
 
     var fp: *const FileProtocol = undefined;
 
@@ -273,36 +273,36 @@ pub fn process_handle(
 
     try fp.getInfo(&FileSystemInfo.guid, &size, buf.ptr).err();
 
-    var info = @ptrCast(*FileSystemInfo, buf);
+    var info = @as(*FileSystemInfo, @ptrCast(buf));
 
-    var guid = blk: {
+    const guid = blk: {
         var iter: ?*DevicePathProtocol = device;
 
         while (iter) |dpp| : (iter = dpp.next()) {
-            var path = dpp.getDevicePath() orelse continue;
+            const path = dpp.getDevicePath() orelse continue;
 
-            var mdp = switch (path) {
+            const mdp = switch (path) {
                 .Media => |m| m,
                 else => continue,
             };
 
-            var disk = switch (mdp) {
+            const disk = switch (mdp) {
                 .HardDrive => |hd| hd,
                 else => continue,
             };
 
             try out.printf("sig type: {s}\r\n, sig: {}\r\n", .{
                 @tagName(disk.signature_type),
-                @bitCast(uefi.Guid, disk.partition_signature),
+                @as(uefi.Guid, @bitCast(disk.partition_signature)),
             });
 
-            break :blk @bitCast(uefi.Guid, disk.partition_signature);
+            break :blk @as(uefi.Guid, @bitCast(disk.partition_signature));
         }
 
         unreachable;
     };
 
-    var label = blk: {
+    const label = blk: {
         var vol = std.mem.span(info.getVolumeLabel());
 
         if (vol.len == 0) {
@@ -323,14 +323,14 @@ pub fn process_handle(
         }
     };
 
-    var disk_info = DiskInfo{
+    const disk_info = DiskInfo{
         .disk = device,
         .label = label,
     };
 
     // Scanning the root directory
     while (try scan_dir(fp, buf)) |fname| {
-        var name = try alloc.dupeZ(u16, fname);
+        const name = try alloc.dupeZ(u16, fname);
 
         try out.print16(name.ptr);
         try out.print("\r\n");
@@ -381,9 +381,9 @@ pub fn caught_main() !void {
     pool_alloc_state = std.heap.ArenaAllocator.init(uefi.pool_allocator);
     pool_alloc = pool_alloc_state.allocator();
 
-    var alloc = pool_alloc;
+    const alloc = pool_alloc;
 
-    var handles = blk: {
+    const handles = blk: {
         var handle_ptr: [*]uefi.Handle = undefined;
         var res_size: usize = undefined;
 

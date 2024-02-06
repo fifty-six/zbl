@@ -3,7 +3,7 @@ const builtin = @import("builtin");
 const uefi = std.os.uefi;
 const Status = uefi.Status;
 
-const SimpleTextOutputProtocol = uefi.protocols.SimpleTextOutputProtocol;
+const SimpleTextOutputProtocol = uefi.protocol.SimpleTextOutput;
 
 const Self = @This();
 
@@ -11,7 +11,7 @@ con: *SimpleTextOutputProtocol,
 
 pub fn putchar(self: *const Self, char: u16) !void {
     var buf = [_]u16{ char, 0 };
-    try err(self.con.outputString(@ptrCast([*:0]u16, &buf)));
+    try err(self.con.outputString(@as([*:0]u16, @ptrCast(&buf))));
 }
 
 pub fn print16(self: *const Self, buf: [*:0]const u16) !void {
@@ -28,8 +28,8 @@ pub fn printf(self: *const Self, comptime format: []const u8, args: anytype) !vo
     var utf16: [2048:0]u16 = undefined;
     var format_buf: [2048]u8 = undefined;
 
-    var slice = try std.fmt.bufPrint(&format_buf, format, args);
-    var length = try std.unicode.utf8ToUtf16Le(&utf16, slice);
+    const slice = try std.fmt.bufPrint(&format_buf, format, args);
+    const length = try std.unicode.utf8ToUtf16Le(&utf16, slice);
 
     utf16[length] = 0;
 
