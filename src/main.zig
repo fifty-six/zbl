@@ -70,7 +70,9 @@ pub fn reboot_into_firmware() !void {
     var size: usize = @sizeOf(usize);
     var os_ind: usize = undefined;
 
-    try rs.getVariable(utf16_str("OsIndications"), global_var, null, &size, &os_ind).err();
+    rs.getVariable(utf16_str("OsIndications"), global_var, null, &size, &os_ind).err() catch {
+        os_ind = 0;
+    };
 
     if ((os_ind & boot_to_firmware) == 0) {
         const attrs: u32 = runtime_access | bootservice_access | nonvolatile_access;
