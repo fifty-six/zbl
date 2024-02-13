@@ -57,7 +57,7 @@ pub fn file_path(
     // u16 of path + null terminator -> 2 * (path.len + 1)
     const buf = try alloc.alloc(u8, size + 2 * (path.len + 1) + @sizeOf(DevicePathProtocol));
 
-    @memcpy(buf, @as([*]u8, @ptrCast(dpp))[0..size]);
+    @memcpy(buf[0..size], @as([*]u8, @ptrCast(dpp))[0..size]);
 
     // Pointer to the start of the protocol, which is - 4 as the size includes the node length field.
     var new_dpp = @as(*FilePathDevicePath, @ptrCast(buf.ptr + size - 4));
