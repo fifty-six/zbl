@@ -39,6 +39,7 @@ const kernel_patterns = [_][:0]const u16{
 };
 
 const initrd_patterns = [_][:0]const u16{
+    utf16_str("initramfs-"),
     utf16_str("initrd-"),
     utf16_str("init-"),
     utf16_str("init"),
