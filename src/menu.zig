@@ -26,6 +26,7 @@ pub fn Menu(comptime err: type) type {
             const Callback = union(enum) {
                 Empty: *const fn () err!void,
                 WithData: DataCallback,
+                Back: void,
             };
 
             description: [:0]const u16,
@@ -67,6 +68,9 @@ pub fn Menu(comptime err: type) type {
                     .Empty => |fun| blk: {
                         break :blk fun();
                     },
+                    .Back => {
+                        return;
+                    },
                 };
 
                 callback_error catch |e| {
@@ -79,7 +83,8 @@ pub fn Menu(comptime err: type) type {
                     continue;
                 };
 
-                unreachable;
+                // If we returned, it's either some toggle or similar
+                // or, we're trying to go back - so re-draw the menu.
             }
         }
 

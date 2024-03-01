@@ -316,6 +316,8 @@ fn _find_kernels(
                 });
             }
 
+            try disk_entries.append(MenuEntry{ .description = utf16_str("Back"), .callback = .{ .Back = {} } });
+
             const menu = try alloc.create(KernelMenu);
             menu.* = KernelMenu.init(
                 try disk_entries.toOwnedSlice(),

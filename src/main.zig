@@ -444,7 +444,7 @@ pub fn caught_main() !void {
 
     try entries.append(MenuEntry{
         .description = utf16_str("Exit"),
-        .callback = .{ .Empty = die_fast },
+        .callback = .{ .Back = {} },
     });
 
     try out.reset(false);
@@ -452,13 +452,12 @@ pub fn caught_main() !void {
     var menu = LoaderMenu.init(entries.items, out, con_in);
 
     try menu.run();
+
+    // If we've returned from the menu - then the user hit back, exit.
+    f_panic.die(.Success);
 }
 
 const f_panic = @import("panic.zig");
 pub fn panic(message: []const u8, trace: ?*std.builtin.StackTrace, ret_addr: ?usize) noreturn {
     f_panic.panic(message, trace, ret_addr);
-}
-
-pub fn die_fast() noreturn {
-    f_panic.die(.Success);
 }
