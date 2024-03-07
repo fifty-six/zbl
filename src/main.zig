@@ -145,6 +145,7 @@ pub fn join_paths(alloc: Allocator, prefix: [:0]const u16, suffix: [:0]const u16
     return res[0 .. res.len - 1 :0];
 }
 
+/// Returns the next file ending in .efi or .EFI in the directory, if any exist.
 pub fn scan_dir(fp: *const FileProtocol, buf: []align(8) u8) !?[:0]const u16 {
     var size = buf.len;
 
@@ -220,6 +221,7 @@ pub fn next_dir(fp: *const FileProtocol, buf: []align(8) u8) !?Directory {
     return null;
 }
 
+/// Add all found EFI bootloader entries in /EFI for the given file protocol to `li`
 pub fn scan_efi(
     alloc: Allocator,
     li: *std.ArrayList(Loader),
@@ -256,6 +258,9 @@ pub fn scan_efi(
     }
 }
 
+/// Given a handle with a SimpleFileSystemProtocol, add all EFI entries of form `EFI/[folder]/*.efi`,
+/// linux kernels with the "typical" names, and EFI files in the root directory. Additionaly, add
+/// anything in the 'exceptions' case - such as Windows' boot loader and macOS'.
 pub fn process_handle(
     alloc: Allocator,
     buf: []align(8) u8,

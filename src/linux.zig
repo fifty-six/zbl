@@ -166,6 +166,9 @@ pub fn load_args(
     return args;
 }
 
+/// Finds any kernels of the "typical" naming scheme and adds them to the loader
+/// list, along with an associated menu entry Additionally checks /boot, in the
+/// case that the partition is a root partition for an OS.
 pub fn find_kernels(
     alloc: Allocator,
     roots: *GuidNameMap,

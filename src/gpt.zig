@@ -144,6 +144,7 @@ const EfiBlockMedia = extern struct {
     optimal_transfer_length_granularity: u32,
 };
 
+/// Adds the GPT partition's name to the passed in GuidNameMap
 pub fn parse_gpt_header(alloc: Allocator, entries: *GuidNameMap, buf: []u8, block_size: u32) !void {
     const mbr_magic = 0xaa55;
     const gpt_indicator = 0xee;
@@ -214,6 +215,7 @@ pub fn parse_gpt_header(alloc: Allocator, entries: *GuidNameMap, buf: []u8, bloc
     }
 }
 
+/// Finds any GPT partition roots, returning a map of partition GUID to name.
 pub fn find_roots(alloc: Allocator) !GuidNameMap {
     const handles = blk: {
         var handle_ptr: [*]uefi.Handle = undefined;
