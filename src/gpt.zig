@@ -153,7 +153,15 @@ pub fn parse_gpt_header(alloc: Allocator, entries: *GuidNameMap, buf: []u8, bloc
 
     const mbr = @as(*align(2) MasterBootRecord, @ptrCast(@alignCast(buf.ptr)));
 
+    if (buf.len < @sizeOf(MasterBootRecord)) {
+        return;
+    }
+
     if (mbr.signature != mbr_magic or mbr.partitions[0].os_indicator != gpt_indicator) {
+        return;
+    }
+
+    if (buf.len < @sizeOf(MasterBootRecord) + @sizeOf(GptHeader)) {
         return;
     }
 
