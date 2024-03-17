@@ -372,6 +372,43 @@ pub fn process_handle(
     try out.println("");
 }
 
+/// Loads all drivers in "[/boot/]EFI/zbl/drivers"
+pub fn load_drivers(alloc: Allocator, device_handle: uefi.Handle) !void {
+    const dp = try boot_services.openProtocolSt(DevicePathProtocol, device_handle);
+    const fp = try boot_services.openProtocolSt(SimpleFileSystemProtocol, device_handle);
+
+    var root: *const protocols.File = undefined;
+    try fp.openVolume(&root).err();
+
+    var drivers: *const protocols.File = undefined;
+    // If the folder doesn't exist, we just exit.
+    root.open(&drivers, utf16_str("EFI\\zbl\\drivers"), FileProtocol.efi_file_mode_read, 0).err() catch {
+        return;
+    };
+
+    var buf: [1024]u8 align(8) = undefined;
+
+    while (try scan_dir(drivers, &buf)) |fname| {
+        const path = try device_path.file_path(alloc, dp, fname);
+
+        var img: ?uefi.Handle = undefined;
+        try boot_services.loadImage(false, uefi.handle, path, null, 0, &img).err();
+
+        var img_proto = try boot_services.openProtocolSt(LoadedImageProtocol, img.?);
+        img_proto.load_options = null;
+        img_proto.load_options_size = 0;
+
+        boot_services.startImage(img.?, null, null).err() catch |e| {
+            switch (e) {
+                // Used by EFI drivers to indicate that the loader should
+                // continue after loading it.
+                error.Aborted => continue,
+                else => return e,
+            }
+        };
+    }
+}
+
 pub fn main() void {
     caught_main() catch unreachable;
 }
@@ -389,6 +426,15 @@ pub fn caught_main() !void {
     pool_alloc = pool_alloc_state.allocator();
 
     const alloc = pool_alloc;
+
+    const img = try boot_services.openProtocolSt(protocols.LoadedImage, uefi.handle);
+
+    if (img.device_handle) |dh| {
+        load_drivers(alloc, dh) catch |e| {
+            try out.printf("Failed to load drivers! {s}\n!", .{@errorName(e)});
+            try boot_services.stall(3 * 1000 * 1000).err();
+        };
+    }
 
     const handles = blk: {
         var handle_ptr: [*]uefi.Handle = undefined;
