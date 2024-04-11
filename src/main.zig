@@ -389,10 +389,11 @@ pub fn load_drivers(alloc: Allocator, device_handle: uefi.Handle) !void {
     var buf: [1024]u8 align(8) = undefined;
 
     while (try scan_dir(drivers, &buf)) |fname| {
-        const path = try device_path.file_path(alloc, dp, fname);
+        const path = try join_paths(alloc, utf16_str("EFI\\zbl\\drivers"), fname);
+        const file_dp = try device_path.file_path(alloc, dp, path);
 
         var img: ?uefi.Handle = undefined;
-        try boot_services.loadImage(false, uefi.handle, path, null, 0, &img).err();
+        try boot_services.loadImage(false, uefi.handle, file_dp, null, 0, &img).err();
 
         var img_proto = try boot_services.openProtocolSt(LoadedImageProtocol, img.?);
         img_proto.load_options = null;
