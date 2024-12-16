@@ -80,7 +80,7 @@ const EfiPartitionEntry = extern struct {
     partition_name: [36]u16 align(1),
 };
 
-const PartitionInfoProtocol = packed struct {
+pub const PartitionInfoProtocol = extern struct {
     const Self = @This();
 
     const PartitionType = enum(u32) {
@@ -94,14 +94,14 @@ const PartitionInfoProtocol = packed struct {
         Gpt: *EfiPartitionEntry,
     };
 
-    revision: u32,
-    type: PartitionType,
-    system: u8,
-    reserved: [7]u8,
+    revision: u32 align(1),
+    type: PartitionType align(1),
+    system: u8 align(1),
+    reserved: [7]u8 align(1),
     info: extern union {
         Mbr: MbrPartitionRecord,
         Gpt: EfiPartitionEntry,
-    },
+    } align(1),
 
     pub fn getInfo(self: *Self) !Info {
         if (self.type == .Other) {

@@ -50,9 +50,9 @@ pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, _: ?
     }
 
     if (uefi.system_table.std_err) |stderr| {
-        print_to(Output{ .con = stderr }, msg, .Clear);
+        print_to(Output{ .con = stderr }, msg, .Unchanged);
     }
-    print_to(stdout, msg, .Clear);
+    print_to(stdout, msg, .Unchanged);
 
     const input_events = [_]uefi.Event{uefi.system_table.con_in.?.wait_for_key};
 

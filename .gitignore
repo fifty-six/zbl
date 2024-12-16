@@ -5,6 +5,9 @@ test.zig
 initramfs*
 vmlinuz*
 
+# OVMF
+*.fd
+
 # build results
 *.efi
 *.obj
@@ -16,6 +19,7 @@ NvVars
 # build
 zig-cache
 zig-out
+.zig-cache
 
 EFI/*
 
