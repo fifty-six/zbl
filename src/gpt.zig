@@ -111,7 +111,7 @@ pub const PartitionInfoProtocol = extern struct {
         return switch (self.type) {
             .Mbr => Info{ .Mbr = @as(*MbrPartitionRecord, @ptrCast(@as([*]u8, @ptrCast(&self)) + @offsetOf(Self, "info"))) },
             .Gpt => Info{ .Gpt = @as(*EfiPartitionEntry, @ptrCast(@as([*]u8, @ptrCast(&self)) + @offsetOf(Self, "info"))) },
-            else => unreachable,
+            else => @panic("Unknown disc type!")
         };
     }
 
@@ -215,7 +215,7 @@ pub fn parse_gpt_header(alloc: Allocator, entries: *GuidNameMap, buf: []u8, bloc
 
                 const res = try std.fmt.bufPrint(&fmt, "unknown {}{s} volume", size);
 
-                break :blk try std.unicode.utf8ToUtf16LeWithNull(alloc, res);
+                break :blk try std.unicode.utf8ToUtf16LeAllocZ(alloc, res);
             }
         };
 
@@ -229,8 +229,8 @@ pub fn find_roots(alloc: Allocator) !GuidNameMap {
         var handle_ptr: [*]uefi.Handle = undefined;
         var res_size: usize = undefined;
 
-        try boot_services.locateHandleBuffer(
-            .ByProtocol,
+        try boot_services._locateHandleBuffer(
+            .by_protocol,
             &BlockIoProtocol.guid,
             null,
             &res_size,
@@ -244,15 +244,15 @@ pub fn find_roots(alloc: Allocator) !GuidNameMap {
     var entries = GuidNameMap.init(alloc);
 
     for (handles) |handle| {
-        var blk_io = boot_services.openProtocolSt(BlockIoProtocol, handle) catch {
+        var blk_io = (boot_services.handleProtocol(BlockIoProtocol, handle) catch {
             continue;
-        };
+        }) orelse continue;
 
         const blk_media = blk_io.media;
 
         var buf: [2048]u8 = undefined;
 
-        blk_io.readBlocks(blk_media.media_id, 0, buf.len, &buf).err() catch {
+        blk_io.readBlocks(blk_media.media_id, 0, &buf) catch {
             continue;
         };
 

@@ -14,7 +14,6 @@ const Status = uefi.Status;
 const protocols = uefi.protocol;
 const FileProtocol = protocols.File;
 const DevicePathProtocol = protocols.DevicePath;
-const FileInfo = uefi.FileInfo;
 
 const Allocator = std.mem.Allocator;
 
@@ -74,6 +73,48 @@ const KernelLoader = struct {
     }
 };
 
+const EfiFileReader = struct {
+    const Reader = std.Io.Reader;
+    const Writer = std.Io.Writer;
+    const Limit = std.Io.Limit;
+
+    const vtable = Reader.VTable {
+        .stream = stream,
+    };
+
+    iface: std.Io.Reader,
+    file: *protocols.File,
+    err: ?(protocols.File.SeekError || protocols.File.ReadError) = null,
+
+    fn stream(r: *Reader, w: *Writer, l: Limit) Reader.StreamError!usize {
+        const self: *EfiFileReader = @fieldParentPtr("iface", r);
+        const f = self.file;
+
+        const buf = try w.writableSliceGreedy(1);
+
+        const amount = f.read(l.slice(buf)) catch |e| {
+            self.err = e;
+            return error.ReadFailed;
+        };
+
+        w.advance(amount);
+
+        return amount;
+    }
+
+    fn init(file: *protocols.File, buf: []u8) @This() {
+        return .{
+            .file = file,
+            .iface = .{
+                .vtable = &vtable,
+                .buffer = buf,
+                .seek = 0,
+                .end = 0
+            },
+        };
+    }
+};
+
 pub fn read_conf(
     alloc: Allocator,
     fp: *const FileProtocol,
@@ -93,14 +134,16 @@ pub fn read_conf(
     const conf_sentinel = conf_name[0 .. conf_name.len - 1 :0];
     try out.print16ln(conf_sentinel.ptr);
 
-    var efp: *FileProtocol = undefined;
-
-    fp.open(&efp, conf_sentinel, FileProtocol.efi_file_mode_read, 0).err() catch |e| {
+    const efp = fp.open(conf_sentinel, .read, .{}) catch |e| {
         try out.printf("{s}\r\n", .{@errorName(e)});
         return e;
     };
 
-    var utf8 = try efp.reader().readAllAlloc(alloc, 1024 * 1024);
+    var buf: [4096]u8 = undefined;
+    var reader = EfiFileReader.init(efp, &buf);
+
+    var utf8 = try reader.iface.readAlloc(alloc, 1024 * 1024);
+    defer alloc.free(utf8);
 
     if (std.mem.endsWith(u8, utf8, "\r\n")) {
         utf8 = utf8[0 .. utf8.len - 2];
@@ -110,7 +153,7 @@ pub fn read_conf(
         utf8 = utf8[0 .. utf8.len - 1];
     }
 
-    return try std.unicode.utf8ToUtf16LeWithNull(alloc, utf8);
+    return try std.unicode.utf8ToUtf16LeAllocZ(alloc, utf8);
 }
 
 pub fn find_initrd(
@@ -135,10 +178,8 @@ pub fn find_initrd(
 
         const initrd = initrd_name[0 .. initrd_name.len - 1 :0];
 
-        var efp: *const FileProtocol = undefined;
-
         // Check that initrd-(...) exists
-        fp.open(&efp, initrd, FileProtocol.efi_file_mode_read, 0).err() catch {
+        _ = fp.open(initrd, .read, .{}) catch {
             alloc.free(initrd_name);
             continue;
         };
@@ -174,16 +215,14 @@ pub fn find_kernels(
     roots: *GuidNameMap,
     li: *std.ArrayList(Loader),
     entries: *std.ArrayList(LoaderMenu.MenuEntry),
-    fp: *const FileProtocol,
+    fp: *FileProtocol,
     disk_info: DiskInfo,
     buf: []align(8) u8,
 ) !void {
     try _find_kernels(alloc, roots, li, entries, fp, disk_info, null, buf);
 
-    var boot_fp: *FileProtocol = undefined;
-
     // Check /boot if it exists for stuff like an ext4 partition
-    fp.open(&boot_fp, utf16_str("boot"), FileProtocol.efi_file_mode_read, 0).err() catch {
+    const boot_fp = fp.open(utf16_str("boot"), .read, .{}) catch {
         return;
     };
 
@@ -195,28 +234,19 @@ fn _find_kernels(
     roots: *GuidNameMap,
     li: *std.ArrayList(Loader),
     entries: *std.ArrayList(LoaderMenu.MenuEntry),
-    fp: *const FileProtocol,
+    fp: *FileProtocol,
     disk_info: DiskInfo,
     root: ?[:0]const u16,
     buf: []align(8) u8,
 ) !void {
-    var size = buf.len;
-
     // Reset the position as we've already scanned
     // past everything while detecting .efi loaders
-    try fp.setPosition(0).err();
+    try fp.setPosition(0);
 
-    while (true) {
-        size = buf.len;
+    while (try fp.read(buf) != 0) {
+        var file_info = @as(*FileProtocol.Info.File, @ptrCast(buf.ptr));
 
-        try fp.read(&size, buf.ptr).err();
-
-        if (size == 0)
-            break;
-
-        var file_info = @as(*FileInfo, @ptrCast(buf.ptr));
-
-        if ((file_info.attribute & FileInfo.efi_file_directory) != 0)
+        if (file_info.attribute.directory)
             continue;
 
         var fname = std.mem.span(file_info.getFileName());
@@ -263,7 +293,7 @@ fn _find_kernels(
 
             // If we have args, use them
             if (loaded_args) |args| {
-                try li.append(Loader{
+                try li.append(alloc, Loader{
                     .disk_info = disk_info,
                     .file_name = file_path,
                     .args = args[0 .. args.len - 1 :0],
@@ -278,7 +308,7 @@ fn _find_kernels(
             const KernelMenu = Menu(main.MenuError);
             const MenuEntry = KernelMenu.MenuEntry;
 
-            var disk_entries = std.ArrayList(MenuEntry).init(alloc);
+            var disk_entries = try std.ArrayList(MenuEntry).initCapacity(alloc, 3);
             const internal_loader = Loader{
                 .disk_info = disk_info,
                 .file_name = file_path,
@@ -290,7 +320,7 @@ fn _find_kernels(
                 var guid16: [128:0]u16 = undefined;
                 var guid_buf: [128]u8 = undefined;
 
-                const guid8 = try std.fmt.bufPrint(&guid_buf, "{}", .{v.key_ptr.*});
+                const guid8 = try std.fmt.bufPrint(&guid_buf, "{f}", .{v.key_ptr.*});
                 const ind = try std.unicode.utf8ToUtf16Le(&guid16, guid8);
 
                 var desc = try std.mem.concat(alloc, u16, &[_][]const u16{
@@ -310,7 +340,7 @@ fn _find_kernels(
                     .alloc = alloc,
                 };
 
-                try disk_entries.append(MenuEntry{
+                try disk_entries.append(alloc, MenuEntry{
                     .description = desc[0 .. desc.len - 1 :0],
                     .callback = .{ .WithData = .{
                         .fun = KernelLoader.load,
@@ -319,11 +349,11 @@ fn _find_kernels(
                 });
             }
 
-            try disk_entries.append(MenuEntry{ .description = utf16_str("Back"), .callback = .{ .Back = {} } });
+            try disk_entries.append(alloc, MenuEntry{ .description = utf16_str("Back"), .callback = .{ .Back = {} } });
 
             const menu = try alloc.create(KernelMenu);
             menu.* = KernelMenu.init(
-                try disk_entries.toOwnedSlice(),
+                try disk_entries.toOwnedSlice(alloc),
                 Output{ .con = uefi.system_table.con_out.? },
                 uefi.system_table.con_in.?,
             );
@@ -343,7 +373,7 @@ fn _find_kernels(
                 &[_]u16{0},
             });
 
-            try entries.append(MenuEntry{
+            try entries.append(alloc, MenuEntry{
                 .description = desc[0 .. desc.len - 1 :0],
                 .callback = .{
                     .WithData = .{

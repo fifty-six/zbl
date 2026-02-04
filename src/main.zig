@@ -18,8 +18,8 @@ const Status = uefi.Status;
 const Menu = menus.Menu;
 const GuidNameMap = gpt.GuidNameMap;
 
-const FileInfo = uefi.FileInfo;
 const FileProtocol = protocols.File;
+const FileInfo = FileProtocol.Info.File;
 const LoadedImageProtocol = protocols.LoadedImage;
 const SimpleFileSystemProtocol = protocols.SimpleFileSystem;
 const DevicePathProtocol = protocols.DevicePath;
@@ -55,14 +55,30 @@ pub const MenuError = error{
     NoSpaceLeft,
     FailedToReadKey,
     InvalidUtf8,
-} || Loader.LoaderError;
+    UnexpectedStatus,
+    DeviceError,
+    NotReady
+} || Loader.LoaderError || ResetError;
 
-pub fn reboot_into_firmware() !void {
-    const nonvolatile_access = 0x01;
-    const bootservice_access = 0x02;
-    const runtime_access = 0x04;
+const ResetError = error{
+    Unexpected,
+    DeviceError,
+    Unsupported,
+    InvalidParameter,
+    SecurityViolation,
+    WriteProtected,
+    OutOfResources,
+    NotFound
+};
+
+pub fn reboot_into_firmware() ResetError!void {
+    // const nonvolatile_access = 0x01;
+    // const bootservice_access = 0x02;
+    // const runtime_access = 0x04;
 
     const boot_to_firmware = 0x01;
+
+    const VariableAttributes = uefi.tables.RuntimeServices.VariableAttributes;
 
     const rs = sys_table.runtime_services;
     const global_var = &uefi.tables.global_variable;
@@ -70,19 +86,19 @@ pub fn reboot_into_firmware() !void {
     var size: usize = @sizeOf(usize);
     var os_ind: usize = undefined;
 
-    rs.getVariable(utf16_str("OsIndications"), global_var, null, &size, &os_ind).err() catch {
+    rs._getVariable(utf16_str("OsIndications"), global_var, null, &size, &os_ind).err() catch {
         os_ind = 0;
     };
 
     if ((os_ind & boot_to_firmware) == 0) {
-        const attrs: u32 = runtime_access | bootservice_access | nonvolatile_access;
+        const attrs: VariableAttributes = .{ .runtime_access = true, .bootservice_access = true, .non_volatile = true };
 
         os_ind |= boot_to_firmware;
 
-        try rs.setVariable(utf16_str("OsIndications"), global_var, attrs, @sizeOf(usize), &os_ind).err();
+        try rs.setVariable(utf16_str("OsIndications"), global_var, attrs, @ptrCast(&os_ind));
     }
 
-    uefi.system_table.runtime_services.resetSystem(.ResetCold, .Success, 0, null);
+    uefi.system_table.runtime_services.resetSystem(.cold, .success, null);
 }
 
 pub const Loader = struct {
@@ -94,7 +110,11 @@ pub const Loader = struct {
 
     pub const LoaderError = error{
         OutOfMemory,
-    } || Status.EfiError;
+        Unexpected,
+        InvalidParameter,
+        SecurityViolation,
+        Unsupported,
+    };
 
     pub fn wrapped_load(opaque_ptr: *anyopaque) LoaderError!void {
         var self = @as(*align(@alignOf(Self)) Self, @ptrCast(@alignCast(opaque_ptr)));
@@ -103,12 +123,19 @@ pub const Loader = struct {
     }
 
     pub fn load(self: *const Self) LoaderError!void {
-        var img: ?uefi.Handle = undefined;
+        var img: uefi.Handle = undefined;
 
         const image_path = try device_path.file_path(pool_alloc, self.disk_info.disk, self.file_name);
-        try boot_services.loadImage(false, uefi.handle, image_path, null, 0, &img).err();
+        boot_services._loadImage(false, uefi.handle, image_path, null, 0, &img).err() catch |e| {
+            switch (e) {
+                error.BufferTooSmall => return error.OutOfMemory,
+                error.Unsupported => return error.Unsupported,
+                else => return error.Unexpected
+            }
+        };
 
-        var img_proto = try boot_services.openProtocolSt(LoadedImageProtocol, img.?);
+        var img_proto = try boot_services.handleProtocol(LoadedImageProtocol, img)
+        orelse std.debug.panic("image had no image protocol!", .{});
 
         if (self.args) |options| {
             out.print("loading ") catch {};
@@ -116,7 +143,7 @@ pub const Loader = struct {
             out.print(", options: ") catch {};
             out.print16ln(options) catch {};
 
-            _ = boot_services.stall(2 * 1000 * 1000);
+            boot_services.stall(2 * 1000 * 1000) catch {};
 
             img_proto.load_options = options.ptr;
             img_proto.load_options_size = @intCast((options.len + 1) * @sizeOf(u16));
@@ -125,7 +152,8 @@ pub const Loader = struct {
             img_proto.load_options_size = 0;
         }
 
-        try boot_services.startImage(img.?, null, null).err();
+        // TODO: print output?
+        _ = try boot_services.startImage(img);
     }
 };
 
@@ -146,20 +174,16 @@ pub fn join_paths(alloc: Allocator, prefix: [:0]const u16, suffix: [:0]const u16
 }
 
 /// Returns the next file ending in .efi or .EFI in the directory, if any exist.
-pub fn scan_dir(fp: *const FileProtocol, buf: []align(8) u8) !?[:0]const u16 {
-    var size = buf.len;
-
+pub fn scan_dir(fp: *FileProtocol, buf: []align(8) u8) !?[:0]const u16 {
     while (true) {
-        size = buf.len;
-
-        try fp.read(&size, buf.ptr).err();
+        const size = try fp.read(buf);
 
         if (size == 0)
             break;
 
-        var file_info = @as(*FileInfo, @ptrCast(buf.ptr));
+        var file_info = @as(*FileProtocol.Info.File, @ptrCast(buf.ptr));
 
-        if ((file_info.attribute & FileInfo.efi_file_directory) != 0)
+        if (file_info.attribute.directory)
             continue;
 
         const fname = std.mem.span(file_info.getFileName());
@@ -180,35 +204,27 @@ pub fn scan_dir(fp: *const FileProtocol, buf: []align(8) u8) !?[:0]const u16 {
 const Directory = struct {
     file_info: *FileInfo,
     dir_name: [:0]const u16,
-    handle: *const FileProtocol,
+    handle: *FileProtocol,
 
-    pub fn deinit(self: *const Directory) void {
-        _ = self.handle.close();
+    // I don't love this taking it by value
+    // but by ptr is annoying because
+    // zig loops return const values(??)
+    pub fn deinit(self: *Directory) void {
+        self.handle.close() catch {};
     }
 };
 
-pub fn next_dir(fp: *const FileProtocol, buf: []align(8) u8) !?Directory {
-    var size = buf.len;
-
-    while (true) {
-        size = buf.len;
-
-        try fp.read(&size, buf.ptr).err();
-
-        if (size == 0)
-            break;
-
-        var file_info = @as(*FileInfo, @ptrCast(buf.ptr));
+pub fn next_dir(fp: *FileProtocol, buf: []align(8) u8) !?Directory {
+    while (try fp.read(buf) != 0) {
+        var file_info = @as(*FileProtocol.Info.File, @ptrCast(buf.ptr));
 
         const fname = std.mem.span(file_info.getFileName());
 
         if (std.mem.eql(u16, fname, utf16_str("..")) or std.mem.eql(u16, fname, utf16_str(".")))
             continue;
 
-        if ((file_info.attribute & FileInfo.efi_file_directory) != 0) {
-            var handle: *const FileProtocol = undefined;
-
-            try fp.open(&handle, file_info.getFileName(), FileProtocol.efi_file_mode_read, 0).err();
+        if (file_info.attribute.directory) {
+            const handle = try fp.open(file_info.getFileName(), .read, .{});
 
             return Directory{
                 .file_info = file_info,
@@ -229,15 +245,17 @@ pub fn scan_efi(
     disk_info: DiskInfo,
     buf: []align(8) u8,
 ) !void {
-    var efi: *const FileProtocol = undefined;
-
-    fp.open(&efi, utf16_str("EFI"), FileProtocol.efi_file_mode_read, 0).err() catch {
+    const efi = fp.open(utf16_str("EFI"), .read, .{}) catch {
         return;
     };
 
     const efi_str = utf16_str("EFI");
 
-    while (try next_dir(efi, buf)) |dir| {
+    while (try next_dir(efi, buf)) |dir_| {
+        // un-const it, since doing it in the loop
+        // materializes a temporary and that becomes const
+        // because idk, zig.
+        var dir = dir_;
         defer dir.deinit();
 
         // Copy out the path with the prefix, as it's in the buffer which will be cleared.
@@ -250,7 +268,7 @@ pub fn scan_efi(
             try out.print16(name.ptr);
             try out.print("\r\n");
 
-            try li.append(Loader{
+            try li.append(alloc, Loader{
                 .disk_info = disk_info,
                 .file_name = name,
             });
@@ -269,36 +287,31 @@ pub fn process_handle(
     loaders: *std.ArrayList(Loader),
     entries: *std.ArrayList(MenuEntry),
 ) !void {
-    var sfsp = try boot_services.openProtocolSt(SimpleFileSystemProtocol, handle);
-    const device = try boot_services.openProtocolSt(DevicePathProtocol, handle);
+    var sfsp = try boot_services.handleProtocol(SimpleFileSystemProtocol, handle) orelse return;
+    const device = try boot_services.handleProtocol(DevicePathProtocol, handle) orelse return;
 
-    var fp: *const FileProtocol = undefined;
 
-    try sfsp.openVolume(&fp).err();
+    var info = try fp.getInfo(.file_system, buf);
 
-    var size = buf.len;
-
-    try fp.getInfo(&FileSystemInfo.guid, &size, buf.ptr).err();
-
-    var info = @as(*FileSystemInfo, @ptrCast(buf));
+    // var info = @as(*FileSystemInfo, @ptrCast(buf));
 
     const guid = blk: {
-        var iter: ?*DevicePathProtocol = device;
+        var iter: ?*const DevicePathProtocol = device;
 
         while (iter) |dpp| : (iter = dpp.next()) {
             const path = dpp.getDevicePath() orelse continue;
 
             const mdp = switch (path) {
-                .Media => |m| m,
+                .media => |m| m,
                 else => continue,
             };
 
             const disk = switch (mdp) {
-                .HardDrive => |hd| hd,
+                .hard_drive => |hd| hd,
                 else => continue,
             };
 
-            try out.printf("sig type: {s}\r\n, sig: {}\r\n", .{
+            try out.printf("sig type: {s}\r\n, sig: {f}\r\n", .{
                 @tagName(disk.signature_type),
                 @as(uefi.Guid, @bitCast(disk.partition_signature)),
             });
@@ -342,7 +355,7 @@ pub fn process_handle(
         try out.print16(name.ptr);
         try out.print("\r\n");
 
-        try loaders.append(Loader{
+        try loaders.append(alloc, Loader{
             .disk_info = disk_info,
             .file_name = name,
         });
@@ -357,13 +370,11 @@ pub fn process_handle(
     };
 
     for (exceptions) |exception| {
-        var efp: *const FileProtocol = undefined;
-
-        fp.open(&efp, exception, FileProtocol.efi_file_mode_read, 0).err() catch {
+        _ = fp.open(exception, .read, .{}) catch {
             continue;
         };
 
-        try loaders.append(Loader{
+        try loaders.append(alloc, Loader{
             .disk_info = disk_info,
             .file_name = exception,
         });
@@ -374,15 +385,13 @@ pub fn process_handle(
 
 /// Loads all drivers in "[/boot/]EFI/zbl/drivers"
 pub fn load_drivers(alloc: Allocator, device_handle: uefi.Handle) !void {
-    const dp = try boot_services.openProtocolSt(DevicePathProtocol, device_handle);
-    const fp = try boot_services.openProtocolSt(SimpleFileSystemProtocol, device_handle);
+    const dp = try boot_services.handleProtocol(DevicePathProtocol, device_handle) orelse std.debug.panic("device has no device path", .{});
+    const fp = try boot_services.handleProtocol(SimpleFileSystemProtocol, device_handle) orelse return;
 
-    var root: *const protocols.File = undefined;
-    try fp.openVolume(&root).err();
+    const root = try fp.openVolume();
 
-    var drivers: *const protocols.File = undefined;
     // If the folder doesn't exist, we just exit.
-    root.open(&drivers, utf16_str("EFI\\zbl\\drivers"), FileProtocol.efi_file_mode_read, 0).err() catch {
+    const drivers = root.open(utf16_str("EFI\\zbl\\drivers"), .read, .{}) catch {
         return;
     };
 
@@ -392,26 +401,30 @@ pub fn load_drivers(alloc: Allocator, device_handle: uefi.Handle) !void {
         const path = try join_paths(alloc, utf16_str("EFI\\zbl\\drivers"), fname);
         const file_dp = try device_path.file_path(alloc, dp, path);
 
-        var img: ?uefi.Handle = undefined;
-        try boot_services.loadImage(false, uefi.handle, file_dp, null, 0, &img).err();
+        var img: uefi.Handle = undefined;
+        try boot_services._loadImage(false, uefi.handle, file_dp, null, 0, &img).err();
 
-        var img_proto = try boot_services.openProtocolSt(LoadedImageProtocol, img.?);
+        // It's literally an image.
+        var img_proto = try boot_services.handleProtocol(LoadedImageProtocol, img) orelse unreachable;
         img_proto.load_options = null;
         img_proto.load_options_size = 0;
 
-        boot_services.startImage(img.?, null, null).err() catch |e| {
-            switch (e) {
-                // Used by EFI drivers to indicate that the loader should
-                // continue after loading it.
-                error.Aborted => continue,
-                else => return e,
-            }
-        };
+        const status = try boot_services.startImage(img);
+
+        if (status.code == .aborted) {
+            continue;
+        } else {
+            return uefi.unexpectedStatus(status.code);
+        }
     }
 }
 
 pub fn main() void {
-    caught_main() catch unreachable;
+    caught_main() catch |e| {
+        // If this doesn't work then oh well.
+        out.printf("Caught error: {s}\n!", .{@errorName(e)}) catch {};
+        boot_services.stall(3 * 1000 * 1000) catch {};
+    };
 }
 
 pub fn caught_main() !void {
@@ -428,12 +441,12 @@ pub fn caught_main() !void {
 
     const alloc = pool_alloc;
 
-    const img = try boot_services.openProtocolSt(protocols.LoadedImage, uefi.handle);
+    const img = try boot_services.handleProtocol(protocols.LoadedImage, uefi.handle);
 
-    if (img.device_handle) |dh| {
+    if (img.?.device_handle) |dh| {
         load_drivers(alloc, dh) catch |e| {
             try out.printf("Failed to load drivers! {s}\n!", .{@errorName(e)});
-            try boot_services.stall(3 * 1000 * 1000).err();
+            try boot_services.stall(3 * 1000 * 1000);
         };
     }
 
@@ -441,8 +454,8 @@ pub fn caught_main() !void {
         var handle_ptr: [*]uefi.Handle = undefined;
         var res_size: usize = undefined;
 
-        try boot_services.locateHandleBuffer(
-            .ByProtocol,
+        try boot_services._locateHandleBuffer(
+            .by_protocol,
             &SimpleFileSystemProtocol.guid,
             null,
             &res_size,
@@ -453,16 +466,16 @@ pub fn caught_main() !void {
     };
     defer uefi.raw_pool_allocator.free(handles);
 
-    var loaders = std.ArrayList(Loader).init(alloc);
+    var loaders = std.ArrayList(Loader).empty;
 
-    var entries = std.ArrayList(MenuEntry).init(alloc);
+    var entries = std.ArrayList(MenuEntry).empty;
 
     var roots = try gpt.find_roots(alloc);
 
-    var miter = roots.iterator();
-    while (miter.next()) |kvp| {
-        try out.printf("{}: {}\r\n", .{ kvp.key_ptr.*, std.unicode.fmtUtf16le(kvp.value_ptr.*) });
-    }
+    // var miter = roots.iterator();
+    // while (miter.next()) |kvp| {
+        // try out.printf("{}: {}\r\n", .{ kvp.key_ptr.*, std.unicode.fmtUtf16le(kvp.value_ptr.*) });
+    // }
 
     var buf: [1024]u8 align(8) = undefined;
 
@@ -480,7 +493,7 @@ pub fn caught_main() !void {
             &[_]u16{0},
         });
 
-        try entries.append(MenuEntry{
+        try entries.append(alloc, MenuEntry{
             .description = desc[0 .. desc.len - 1 :0],
             .callback = .{ .WithData = .{
                 .fun = Loader.wrapped_load,
@@ -489,14 +502,22 @@ pub fn caught_main() !void {
         });
     }
 
-    try entries.append(MenuEntry{
+    try entries.append(alloc, MenuEntry{
         .description = utf16_str("Reboot into firmware"),
         .callback = .{ .Empty = reboot_into_firmware },
     });
 
-    try entries.append(MenuEntry{
+    try entries.append(alloc, MenuEntry{
         .description = utf16_str("Exit"),
         .callback = .{ .Back = {} },
+    });
+
+    try entries.append(alloc, MenuEntry {
+        .description = utf16_str("Print roots"),
+        .callback = .{ .WithData = .{
+            .fun = print_roots,
+            .data = &roots
+        } },
     });
 
     try out.reset(false);
@@ -506,7 +527,60 @@ pub fn caught_main() !void {
     try menu.run();
 
     // If we've returned from the menu - then the user hit back, exit.
-    f_panic.die(.Success);
+    f_panic.die(.success);
+}
+
+pub fn print_roots(opaque_ptr: *anyopaque) !void {
+    var roots: *GuidNameMap = @alignCast(@ptrCast(opaque_ptr));
+
+    try out.reset(false);
+
+    var it = roots.iterator();
+    while (it.next()) |v| {
+        var guid16: [128:0]u16 = undefined;
+        var guid_buf: [128]u8 = undefined;
+
+        const guid8 = try std.fmt.bufPrint(&guid_buf, "{f}", .{v.key_ptr.*});
+        const ind = try std.unicode.utf8ToUtf16Le(&guid16, guid8);
+
+        const desc = try std.mem.concat(pool_alloc, u16, &[_][]const u16{
+            v.value_ptr.*,
+            utf16_str(": "),
+            guid16[0..ind],
+            &[_]u16{0},
+        });
+
+        out.print16ln(desc[0 .. desc.len - 1:0].ptr) catch |e| {
+            guid16[ind] = 0;
+
+            try out.print16(guid16[0 .. ind : 0]);
+            try out.print(": ");
+            try out.printf("invalid desc {s}\r\n", .{@errorName(e)});
+
+            try out.println("==========");
+
+            const partitions = @divFloor(desc.len, 20);
+
+            for (0..partitions) |i| {
+                try out.printf("{any}\r\n", .{desc[i * 20 .. @min((i + 1) * 20, desc.len)]});
+            }
+
+            if ((partitions * 20) != desc.len) {
+                try out.printf("{any}\r\n", .{desc[partitions * 20 .. desc.len]});
+            }
+
+            try out.println("==========");
+        };
+    }
+
+    const input_events = [_]uefi.Event{uefi.system_table.con_in.?.wait_for_key};
+
+    // Make sure we have at least a second to see the error
+    // to prevent accidental dismissal of the message.
+    uefi.system_table.boot_services.?.stall(1 * 1000 * 1000) catch {};
+
+    // Wait for an input.
+    _ = try uefi.system_table.boot_services.?.waitForEvent(&input_events);
 }
 
 const f_panic = @import("panic.zig");

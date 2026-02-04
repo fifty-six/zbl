@@ -15,13 +15,13 @@ var panic_allocator_state = std.heap.FixedBufferAllocator.init(&panic_allocator_
 const panic_allocator = panic_allocator_state.allocator();
 
 pub fn die(status: Status) noreturn {
-    uefi.system_table.runtime_services.resetSystem(.ResetShutdown, status, 0, null);
+    uefi.system_table.runtime_services.resetSystem(.shutdown, status, null);
 }
 
 const Reset = enum { Clear, Unchanged };
 
 pub fn print_to(out: Output, msg: []const u8, reset: Reset) void {
-    _ = out.con.setAttribute(SimpleTextOutputProtocol.red);
+    out.con.setAttribute(SimpleTextOutputProtocol.Attribute { .foreground = .red }) catch {};
 
     if (reset == .Clear) {
         out.reset(false) catch {};
@@ -32,7 +32,7 @@ pub fn print_to(out: Output, msg: []const u8, reset: Reset) void {
 }
 
 pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, _: ?usize) noreturn {
-    @setCold(true);
+    @branchHint(.cold);
 
     // Don't have DWARF info.
     _ = error_return_trace;
@@ -60,11 +60,11 @@ pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, _: ?
 
     // Make sure we have at least 3 seconds to see the error
     // to prevent accidental dismissal of the message.
-    _ = uefi.system_table.boot_services.?.stall(3 * 1000 * 1000);
+    _ = uefi.system_table.boot_services.?._stall(3 * 1000 * 1000);
 
     // Wait for an input.
-    if (uefi.system_table.boot_services.?.waitForEvent(input_events.len, &input_events, &index) == .Success) {
-        die(.Aborted);
+    if (uefi.system_table.boot_services.?._waitForEvent(input_events.len, &input_events, &index) == .success) {
+        die(.aborted);
     }
 
     // Try to halt instead of busy-looping.

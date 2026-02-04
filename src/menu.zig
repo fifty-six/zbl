@@ -52,7 +52,9 @@ pub fn Menu(comptime err: type) type {
                 ._res = Vec{ .x = 0, .y = 0 },
             };
 
-            _ = out.con.queryMode(out.con.mode.mode, &self._res.x, &self._res.y);
+            const g = out.con.queryMode(out.con.mode.mode) catch std.debug.panic("queryMode", .{});
+            self._res.x = g.columns;
+            self._res.y = g.rows;
 
             return self;
         }
@@ -77,7 +79,7 @@ pub fn Menu(comptime err: type) type {
                     try self.out.reset(false);
 
                     try self.out.printf("error in menu callback: {s}\r\n", .{@errorName(e)});
-                    _ = @import("main.zig").boot_services.stall(1000 * 1000);
+                    @import("main.zig").boot_services.stall(1000 * 1000) catch {};
 
                     try self.out.reset(false);
                     continue;
@@ -96,14 +98,12 @@ pub fn Menu(comptime err: type) type {
             const input_events = [_]uefi.Event{self.in.wait_for_key};
 
             var index: usize = undefined;
-            while (boot_services.waitForEvent(input_events.len, &input_events, &index) == .Success) {
+            while (boot_services._waitForEvent(input_events.len, &input_events, &index) == .success) {
                 if (index != 0) {
                     @panic("received invalid index");
                 }
 
-                var key: In.Key.Input = undefined;
-                if (self.in.readKeyStroke(&key) != .Success)
-                    return error.FailedToReadKey;
+                const key = try self.in.readKeyStroke();
 
                 switch (key.scan_code) {
                     // Up/Down arrow
@@ -121,7 +121,7 @@ pub fn Menu(comptime err: type) type {
 
                     // Escape
                     0x17 => {
-                        panic_handler.die(.Success);
+                        panic_handler.die(.success);
                     },
 
                     else => {},
@@ -137,7 +137,7 @@ pub fn Menu(comptime err: type) type {
                 try self.draw();
             }
 
-            unreachable;
+            @panic("Escaped input loop!");
         }
 
         pub fn draw(self: *const Self) !void {
@@ -149,21 +149,28 @@ pub fn Menu(comptime err: type) type {
             center.y -= @divFloor(self.entries.len, 2);
 
             for (self.entries, 0..) |entry, i| {
-                const start = center.x - @divFloor(entry.description.len, 2);
+                const start_t = @subWithOverflow(center.x, @divFloor(entry.description.len, 2));
 
-                try self.out.setCursorPosition(start, center.y + i);
+                // if (start_t[1] == 1) {
+                //     try self.out.print("integer overflow in desc len??");
+                //     continue;
+                // }
+
+                try self.out.setCursorPosition(if (start_t[1] == 1) 0 else start_t[0], center.y + i);
 
                 if (self._highlighted == i) {
-                    _ = self.out.con.setAttribute(ConOut.background_lightgray | ConOut.black);
+                    try self.out.con.setAttribute(.{ .background = .lightgray, .foreground =  .black });
                 } else {
-                    _ = self.out.con.setAttribute(ConOut.background_black | ConOut.white);
+                    try self.out.con.setAttribute(.{ .background = .black, .foreground =  .white });
                 }
 
-                try self.out.print16(entry.description);
+                self.out.print16(entry.description) catch |e| {
+                    try self.out.printf("invalid desc ({s})\r\n", .{@errorName(e)});
+                };
                 try self.out.print("\r\n");
             }
 
-            _ = self.out.con.setAttribute(ConOut.background_black | ConOut.white);
+                    try self.out.con.setAttribute(.{ .background = .black, .foreground =  .white });
             try self.out.println("");
         }
     };

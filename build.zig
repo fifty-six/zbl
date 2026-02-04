@@ -12,7 +12,7 @@ pub fn build(b: *std.Build) void {
     // means any target is allowed, and the default is native. Other options
     // for restricting supported target set are available.
     // const target = b.standardTargetOptions(.{});
-    const t_query = .{
+    const t_query = Target.Query{
         .cpu_arch = Target.Cpu.Arch.x86_64,
         .os_tag = Target.Os.Tag.uefi,
         .abi = Target.Abi.msvc,
@@ -25,13 +25,17 @@ pub fn build(b: *std.Build) void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
+    const mod = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const exe = b.addExecutable(.{
         .name = "bootx64",
         // In this case the main source file is merely a path, however, in more
         // complicated build scripts, this could be a generated file.
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = mod,
     });
 
     // This declares intent for the executable to be installed into the
@@ -72,9 +76,7 @@ pub fn build(b: *std.Build) void {
     // Creates a step for unit testing. This only builds the test executable
     // but does not run it.
     const unit_tests = b.addTest(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = mod
     });
 
     const run_unit_tests = b.addRunArtifact(unit_tests);

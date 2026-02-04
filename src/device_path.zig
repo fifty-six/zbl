@@ -40,7 +40,7 @@ pub fn dpp_size(dpp: *DevicePathProtocol) usize {
     const start = dpp;
 
     var node = dpp;
-    while (node.type != .End) {
+    while (node.type != .end) {
         node = @as(*DevicePathProtocol, @ptrCast(@as([*]u8, @ptrCast(node)) + node.length));
     }
 
@@ -62,8 +62,8 @@ pub fn file_path(
     // Pointer to the start of the protocol, which is - 4 as the size includes the node length field.
     var new_dpp = @as(*FilePathDevicePath, @ptrCast(buf.ptr + size - 4));
 
-    new_dpp.type = .Media;
-    new_dpp.subtype = .FilePath;
+    new_dpp.type = .media;
+    new_dpp.subtype = .file_path;
     new_dpp.length = @sizeOf(FilePathDevicePath) + 2 * (@as(u16, @intCast(path.len)) + 1);
 
     var ptr = @as([*:0]u16, @ptrCast(@as([*]align(2) u8, @alignCast(@ptrCast(new_dpp))) + @sizeOf(FilePathDevicePath)));
@@ -74,8 +74,8 @@ pub fn file_path(
     ptr[path.len] = 0;
 
     var next = @as(*EndEntireDevicePath, @ptrCast(@as([*]u8, @ptrCast(new_dpp)) + new_dpp.length));
-    next.type = .End;
-    next.subtype = .EndEntire;
+    next.type = .end;
+    next.subtype = .end_entire;
     next.length = @sizeOf(EndEntireDevicePath);
 
     return @as(*DevicePathProtocol, @ptrCast(buf.ptr));
@@ -86,7 +86,7 @@ pub fn to_str(alloc: std.mem.Allocator, dpp: *DevicePathProtocol) ![:0]u16 {
     errdefer res.deinit();
 
     var node = dpp;
-    while (node.type != .End) {
+    while (node.type != .end) {
         const q_path = node.getDevicePath();
 
         // Unhandled upstream, just append the tag name.
@@ -100,10 +100,10 @@ pub fn to_str(alloc: std.mem.Allocator, dpp: *DevicePathProtocol) ![:0]u16 {
         const path = q_path.?;
 
         switch (path) {
-            .Hardware => |hw| {
+            .hardware => |hw| {
                 try res.appendSlice(tag_to_utf16_literal.get(@tagName(hw)).?);
             },
-            .Media => |m| {
+            .media => |m| {
                 switch (m) {
                     .FilePath => |fp| {
                         try res.appendSlice(std.mem.span(fp.getPath()));
@@ -113,11 +113,11 @@ pub fn to_str(alloc: std.mem.Allocator, dpp: *DevicePathProtocol) ![:0]u16 {
                     },
                 }
             },
-            .Messaging, .Acpi => {
+            .messaging, .acpi => {
                 // TODO: upstream
             },
             // We're adding a backslash after anyways, so use that.
-            .End => {},
+            .end => {},
             else => {
                 try res.append('?');
             },
