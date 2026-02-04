@@ -290,6 +290,7 @@ pub fn process_handle(
     var sfsp = try boot_services.handleProtocol(SimpleFileSystemProtocol, handle) orelse return;
     const device = try boot_services.handleProtocol(DevicePathProtocol, handle) orelse return;
 
+    var fp = try sfsp.openVolume();
 
     var info = try fp.getInfo(.file_system, buf);
 
@@ -319,14 +320,22 @@ pub fn process_handle(
             break :blk @as(uefi.Guid, @bitCast(disk.partition_signature));
         }
 
-        unreachable;
+        @panic("No GUID!");
     };
 
     const label = blk: {
         var vol = std.mem.span(info.getVolumeLabel());
 
         if (vol.len == 0) {
-            vol = utf16_str("unknown disk");
+            // TODO: refactor
+            var guid16: [128:0]u16 = undefined;
+            var guid_buf: [128]u8 = undefined;
+
+            const guid8 = try std.fmt.bufPrint(&guid_buf, "{f}", .{guid});
+            const ind = try std.unicode.utf8ToUtf16Le(&guid16, guid8);
+            guid16[ind] = 0;
+
+            vol = try alloc.dupeZ(u16, guid16[0 .. ind : 0]); // utf16_str("unknown disk");
         }
 
         if (roots.get(guid)) |fs_label| {
