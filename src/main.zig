@@ -72,10 +72,6 @@ const ResetError = error{
 };
 
 pub fn reboot_into_firmware() ResetError!void {
-    // const nonvolatile_access = 0x01;
-    // const bootservice_access = 0x02;
-    // const runtime_access = 0x04;
-
     const boot_to_firmware = 0x01;
 
     const VariableAttributes = uefi.tables.RuntimeServices.VariableAttributes;
