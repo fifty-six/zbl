@@ -2,3 +2,4 @@ trap /usr/bin/reset EXIT
 trap /usr/bin/reset SIGINT
 
 qemu-system-x86_64 -bios /usr/share/edk2-ovmf/x64/OVMF.fd -hdd fat:rw:. -serial stdio # -display none
+qemu-system-x86_64 -bios /usr/share/edk2-ovmf/x64/OVMF.4m.fd -hdd fat:rw:. -serial stdio -cpu host -enable-kvm # -display none
